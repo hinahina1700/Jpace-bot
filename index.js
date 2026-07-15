@@ -382,7 +382,7 @@ const COMMANDS_LIST = [
 
       return {
         embeds: [{
-          title: '🎨 カラーパネル（wplace標準色 / 画像と同じ並び順）',
+          title: '🎨 カラーパネル',
           description: '各色の名前は `/add_role` の色選択候補（入力補完）から確認できます。',
           fields,
           color: 0x2b2d31,
