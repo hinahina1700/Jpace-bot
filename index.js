@@ -1,4 +1,119 @@
 // ==========================================
+// 🎨 wplace標準カラーパレット (画像から抽出、2026/06/23時点 ver.001)
+// key: 内部識別子（そのままロール検索やautocompleteのvalueに使う）
+// ==========================================
+const WPLACE_COLORS = [
+  { key: 'black', name: 'black', hex: '000000' },
+  { key: 'dark_gray', name: 'dark gray', hex: '3C3C3C' },
+  { key: 'gray', name: 'gray', hex: '787878' },
+  { key: 'light_gray', name: 'light gray', hex: 'D2D2D2' },
+  { key: 'white', name: 'white', hex: 'FFFFFF' },
+  { key: 'deep_red', name: 'deep red', hex: '600018' },
+  { key: 'red', name: 'red', hex: 'ED1C24' },
+  { key: 'orange', name: 'orange', hex: 'FF7F27' },
+  { key: 'gold', name: 'gold', hex: 'F6AA09' },
+  { key: 'yellow', name: 'yellow', hex: 'F9DD3B' },
+  { key: 'light_yellow', name: 'light yellow', hex: 'FFFABC' },
+  { key: 'dark_green', name: 'dark green', hex: '0EB968' },
+  { key: 'green', name: 'green', hex: '13E67B' },
+  { key: 'light_green', name: 'light green', hex: '87FF5E' },
+  { key: 'dark_teal', name: 'dark teal', hex: '0C816E' },
+  { key: 'teal', name: 'teal', hex: '10AEA6' },
+  { key: 'light_teal', name: 'light teal', hex: '13E1BE' },
+  { key: 'dark_blue', name: 'dark blue', hex: '28509E' },
+  { key: 'blue', name: 'blue', hex: '4093E4' },
+  { key: 'cyan', name: 'cyan', hex: '60F7F2' },
+  { key: 'indigo', name: 'indigo', hex: '6B50F6' },
+  { key: 'light_indigo', name: 'light indigo', hex: '99B1FB' },
+  { key: 'dark_purple', name: 'dark purple', hex: '780C99' },
+  { key: 'purple', name: 'purple', hex: 'AA38B9' },
+  { key: 'light_purple', name: 'light purple', hex: 'E09FF9' },
+  { key: 'dark_pink', name: 'dark pink', hex: 'CB007A' },
+  { key: 'pink', name: 'pink', hex: 'EC1F80' },
+  { key: 'light_pink', name: 'light pink', hex: 'F38DA9' },
+  { key: 'dark_brown', name: 'dark brown', hex: '684634' },
+  { key: 'brown', name: 'brown', hex: '95682A' },
+  { key: 'beige', name: 'beige', hex: 'F8B277' },
+  { key: 'medium_gray', name: 'medium gray', hex: 'AAAAAA' },
+  { key: 'dark_red', name: 'dark red', hex: 'A50E1E' },
+  { key: 'light_red', name: 'light red', hex: 'FA8072' },
+  { key: 'dark_orange', name: 'dark orange', hex: 'E45C1A' },
+  { key: 'dark_goldenrod', name: 'dark goldenrod', hex: '9C8431' },
+  { key: 'goldenrod', name: 'goldenrod', hex: 'C5AD31' },
+  { key: 'light_goldenrod', name: 'light goldenrod', hex: 'E8D45F' },
+  { key: 'dark_olive', name: 'dark olive', hex: '4A6B3A' },
+  { key: 'olive', name: 'olive', hex: '5A944A' },
+  { key: 'light_olive', name: 'light olive', hex: '84C573' },
+  { key: 'dark_cyan', name: 'dark cyan', hex: '0F799F' },
+  { key: 'light_cyan', name: 'light cyan', hex: 'BBFAF2' },
+  { key: 'dark_indigo', name: 'dark indigo', hex: '4D31B8' },
+  { key: 'dark_slate_blue', name: 'dark slate blue', hex: '4A4284' },
+  { key: 'slate_blue', name: 'slate blue', hex: '7A71C4' },
+  { key: 'light_slate_blue', name: 'light slate blue', hex: 'B5AEF1' },
+  { key: 'dark_peach', name: 'dark peach', hex: '9B5249' },
+  { key: 'peach', name: 'peach', hex: 'D18078' },
+  { key: 'light_peach', name: 'light peach', hex: 'FAB6A4' },
+  { key: 'dark_tan', name: 'dark tan', hex: '7B6352' },
+  { key: 'tan', name: 'tan', hex: '9C846B' },
+  { key: 'light_tan', name: 'light tan', hex: 'D6B594' },
+  { key: 'dark_beige', name: 'dark beige', hex: 'D18051' },
+  { key: 'light_beige', name: 'light beige', hex: 'FFC5A5' },
+  { key: 'dark_stone', name: 'dark stone', hex: '6D643F' },
+  { key: 'stone', name: 'stone', hex: '948C6B' },
+  { key: 'light_stone', name: 'light stone', hex: 'CDC59E' },
+  { key: 'dark_slate', name: 'dark slate', hex: '333941' },
+  { key: 'slate', name: 'slate', hex: '6D758D' },
+  { key: 'light_slate', name: 'light slate', hex: 'B3B9D1' },
+];
+
+// パネル表示用に近い色の四角い絵文字を選ぶ（簡易的な視覚表現）
+const SWATCH_EMOJIS = [
+  { emoji: '⬛', rgb: [0, 0, 0] },
+  { emoji: '⬜', rgb: [255, 255, 255] },
+  { emoji: '🟥', rgb: [237, 28, 36] },
+  { emoji: '🟧', rgb: [255, 127, 39] },
+  { emoji: '🟨', rgb: [249, 221, 59] },
+  { emoji: '🟩', rgb: [19, 230, 123] },
+  { emoji: '🟦', rgb: [64, 147, 228] },
+  { emoji: '🟪', rgb: [170, 56, 185] },
+  { emoji: '🟫', rgb: [149, 104, 42] },
+];
+
+function hexToRgb(hex) {
+  const int = parseInt(hex, 16);
+  return [(int >> 16) & 255, (int >> 8) & 255, int & 255];
+}
+
+function nearestSwatchEmoji(hex) {
+  const [r, g, b] = hexToRgb(hex);
+  let best = SWATCH_EMOJIS[0];
+  let bestDist = Infinity;
+  for (const s of SWATCH_EMOJIS) {
+    const d = (r - s.rgb[0]) ** 2 + (g - s.rgb[1]) ** 2 + (b - s.rgb[2]) ** 2;
+    if (d < bestDist) {
+      bestDist = d;
+      best = s;
+    }
+  }
+  return best.emoji;
+}
+
+// ==========================================
+// 🔧 Discord REST API 呼び出し用ヘルパー
+// ==========================================
+async function discordApi(env, endpoint, options = {}) {
+  const res = await fetch(`https://discord.com/api/v10${endpoint}`, {
+    ...options,
+    headers: {
+      Authorization: `Bot ${env.DISCORD_TOKEN}`,
+      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      ...options.headers,
+    },
+  });
+  return res;
+}
+
+// ==========================================
 // 📋 コマンドの「名前」「説明(description)」「処理」をセットで定義
 // ==========================================
 const COMMANDS_LIST = [
@@ -11,7 +126,7 @@ const COMMANDS_LIST = [
   {
     name: 'help',
     description: '利用可能なコマンドの一覧を表示します。',
-    execute: () => ({ content: '📚 **Botコマンドヘルプ**\n以下のコマンドが利用可能です！\n`/now`, `/avatar`, `/server_info`, `/user_info`, `/ping` を試してみてね！' })
+    execute: () => ({ content: '📚 **Botコマンドヘルプ**\n以下のコマンドが利用可能です！\n`/now`, `/avatar`, `/server_info`, `/user_info`, `/add_role`, `/color_panel`, `/ping` を試してみてね！' })
   },
   
   // --- 【新設】現在の状況を表示するコマンド ---
@@ -146,7 +261,117 @@ const COMMANDS_LIST = [
         ].join('\n')
       };
     }
-  }
+  },
+
+  // --- 【新設】カラーロール系 ---
+  {
+    name: 'add_role',
+    description: 'wplace標準カラーから色を選んで、自分だけのカラーロールを作成・付与します。',
+    options: [
+      {
+        type: 3, // STRING
+        name: 'color',
+        description: 'wplaceカラーを選択（入力すると候補が絞り込まれます）',
+        required: true,
+        autocomplete: true,
+      },
+      {
+        type: 3, // STRING
+        name: 'name',
+        description: 'ロールの名前を入力',
+        required: true,
+      },
+    ],
+    // ロール一覧取得→作成→付与と複数回のAPI通信が必要なため、3秒制限を避けてdeferする
+    deferred: true,
+    execute: async (options, user, interaction, env) => {
+      const guildId = interaction.guild_id;
+      if (!guildId) return { content: '❌ このコマンドはサーバー内でのみ使用できます。' };
+
+      const colorKey = options?.find(o => o.name === 'color')?.value;
+      const roleName = options?.find(o => o.name === 'name')?.value?.trim();
+      const colorInfo = WPLACE_COLORS.find(c => c.key === colorKey);
+
+      if (!colorInfo) {
+        return { content: '❌ 無効なカラーです。候補一覧から選択し直してください。' };
+      }
+      if (!roleName || roleName.length > 100) {
+        return { content: '❌ ロール名は1〜100文字で入力してください。' };
+      }
+
+      const colorInt = parseInt(colorInfo.hex, 16);
+
+      // 既存の同名・同色ロールがあれば使い回し、なければ新規作成
+      const rolesRes = await discordApi(env, `/guilds/${guildId}/roles`);
+      if (!rolesRes.ok) {
+        return { content: '❌ ロール一覧の取得に失敗しました。Botに「ロールの管理」権限があるか確認してください。' };
+      }
+      const guildRoles = await rolesRes.json();
+      let role = guildRoles.find(r => r.name === roleName && r.color === colorInt);
+
+      if (!role) {
+        const createRes = await discordApi(env, `/guilds/${guildId}/roles`, {
+          method: 'POST',
+          body: JSON.stringify({ name: roleName, color: colorInt, mentionable: true }),
+        });
+        if (!createRes.ok) {
+          const errText = await createRes.text();
+          return { content: `❌ ロールの作成に失敗しました:\n\`${errText}\`\nBotの権限とロール階層をご確認ください。` };
+        }
+        role = await createRes.json();
+      }
+
+      const assignRes = await discordApi(env, `/guilds/${guildId}/members/${user.id}/roles/${role.id}`, {
+        method: 'PUT',
+      });
+      if (!assignRes.ok) {
+        const errText = await assignRes.text();
+        return { content: `⚠️ ロール <@&${role.id}> は作成済みですが、付与に失敗しました:\n\`${errText}\`` };
+      }
+
+      const swatch = nearestSwatchEmoji(colorInfo.hex);
+      return {
+        content: `✅ ${swatch} <@&${role.id}> (**${colorInfo.name}** \`#${colorInfo.hex}\`) を作成し、付与しました！`,
+      };
+    },
+  },
+  {
+    name: 'color_panel',
+    description: 'wplace標準カラーパレット一覧と、サーバー内で使われているロールを表示します。',
+    deferred: true,
+    execute: async (options, currentUser, interaction, env) => {
+      const guildId = interaction.guild_id;
+      if (!guildId) return { content: '❌ このコマンドはサーバー内でのみ使用できます。' };
+
+      const rolesRes = await discordApi(env, `/guilds/${guildId}/roles`);
+      if (!rolesRes.ok) {
+        return { content: '❌ ロール一覧の取得に失敗しました。Botの権限をご確認ください。' };
+      }
+      const guildRoles = await rolesRes.json();
+
+      const lines = WPLACE_COLORS.map(c => {
+        const colorInt = parseInt(c.hex, 16);
+        const matched = guildRoles.find(r => r.color === colorInt);
+        const swatch = nearestSwatchEmoji(c.hex);
+        const roleText = matched ? `<@&${matched.id}>` : '`未使用`';
+        return `${swatch} \`#${c.hex}\` **${c.name}** — ${roleText}`;
+      });
+
+      // Discordのembed description上限(4096文字)を考慮してチャンク分割
+      const chunkSize = 20;
+      const embeds = [];
+      for (let i = 0; i < lines.length; i += chunkSize) {
+        embeds.push({
+          title: i === 0 ? '🎨 カラーパネル（wplace標準色）' : undefined,
+          description: lines.slice(i, i + chunkSize).join('\n'),
+          color: 0x2b2d31,
+          footer: i + chunkSize >= lines.length ? { text: '/add_role で好きな色のロールを作成できます' } : undefined,
+        });
+      }
+
+      return { content: '', embeds };
+    },
+  },
 ];
 
 // ==========================================
@@ -179,15 +404,19 @@ async function verifyDiscordSignature(request, publicKey) {
 // ==========================================
 // FormDataかJSONかを自動判定してDiscordへ返信/編集する共通処理
 function buildReplyBody(replyResult) {
+  const payload = {};
+  if (replyResult.content) payload.content = replyResult.content;
+  if (replyResult.embeds) payload.embeds = replyResult.embeds;
+
   if (replyResult.file) {
     const formData = new FormData();
-    formData.append('payload_json', JSON.stringify({ content: replyResult.content }));
+    formData.append('payload_json', JSON.stringify(payload));
     const blob = new Blob([replyResult.file.buffer], { type: replyResult.file.type });
     formData.append('files[0]', blob, replyResult.file.name);
     return { body: formData, headers: {} };
   }
   return {
-    body: JSON.stringify({ content: replyResult.content }),
+    body: JSON.stringify(payload),
     headers: { 'Content-Type': 'application/json' },
   };
 }
@@ -225,6 +454,25 @@ export default {
 
     const interaction = await request.json();
     
+    // オートコンプリート（/add_role の color 入力候補）
+    if (interaction.type === 4) {
+      const focusedOption =
+        interaction.data.options?.find(o => o.focused) ||
+        interaction.data.options?.[interaction.data.options.length - 1];
+      const query = (focusedOption?.value ?? '').toString().toLowerCase();
+
+      const filtered = WPLACE_COLORS.filter(
+        c => c.name.toLowerCase().includes(query) || c.hex.toLowerCase().includes(query)
+      ).slice(0, 25);
+
+      const choices = filtered.map(c => ({ name: `${c.name} #${c.hex}`, value: c.key }));
+
+      return new Response(
+        JSON.stringify({ type: 8, data: { choices } }), // APPLICATION_COMMAND_AUTOCOMPLETE_RESULT
+        { headers: { 'content-type': 'application/json' } }
+      );
+    }
+
     // PING (Discordからの死活監視用)
     if (interaction.type === 1) {
       return new Response(JSON.stringify({ type: 1 }), {
@@ -253,7 +501,7 @@ export default {
         ctx.waitUntil((async () => {
           let replyResult;
           try {
-            replyResult = await matchedCommand.execute(options, user, interaction);
+            replyResult = await matchedCommand.execute(options, user, interaction, env);
           } catch (err) {
             replyResult = { content: `❌ エラーが発生しました: ${err.message}` };
           }
@@ -272,21 +520,24 @@ export default {
       // 通常コマンド：すぐに実行して即レスポンス
       let replyResult;
       try {
-        replyResult = await matchedCommand.execute(options, user, interaction);
+        replyResult = await matchedCommand.execute(options, user, interaction, env);
       } catch (err) {
         replyResult = { content: `❌ エラーが発生しました: ${err.message}` };
       }
 
       if (replyResult.file) {
         const formData = new FormData();
-        formData.append('payload_json', JSON.stringify({ type: 4, data: { content: replyResult.content } }));
+        formData.append(
+          'payload_json',
+          JSON.stringify({ type: 4, data: { content: replyResult.content, embeds: replyResult.embeds } })
+        );
         const blob = new Blob([replyResult.file.buffer], { type: replyResult.file.type });
         formData.append('files[0]', blob, replyResult.file.name);
         return new Response(formData);
       }
 
       return new Response(
-        JSON.stringify({ type: 4, data: { content: replyResult.content } }),
+        JSON.stringify({ type: 4, data: { content: replyResult.content, embeds: replyResult.embeds } }),
         { headers: { 'content-type': 'application/json' } }
       );
     }
