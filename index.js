@@ -18,6 +18,9 @@ const COMMANDS_LIST = [
   {
     name: 'now',
     description: '現在のキャンバスの状況を画像として生成し、表示します。',
+    // 外部APIからの画像取得に3秒以上かかることがあるため、
+    // Discordの応答タイムアウト(3秒)を回避するために deferred 応答を使う
+    deferred: true,
     execute: async () => {
       // 注目の中心タイル(1879, 785)をダイレクトに取得して返します。
       const tileX = 1879;
@@ -50,7 +53,21 @@ const COMMANDS_LIST = [
     options: [{ type: 6, name: 'user', description: 'アイコンを見たいメンバーを選択（空欄なら自分）', required: false }],
     execute: (options, user, interaction) => {
       const targetUser = interaction.data.resolved?.users?.[options?.[0]?.value] || user;
-      return { content: `📸 **${targetUser.username}** のアイコン画像はこちら！\nhttps://cdn.discordapp.com/avatars/${targetUser.id}/${targetUser.avatar}.png?size=1024` };
+
+      let avatarUrl;
+      if (targetUser.avatar) {
+        // アニメーションアイコン(hashが"a_"で始まる)ならgif、それ以外はpng
+        const ext = targetUser.avatar.startsWith('a_') ? 'gif' : 'png';
+        avatarUrl = `https://cdn.discordapp.com/avatars/${targetUser.id}/${targetUser.avatar}.${ext}?size=1024`;
+      } else {
+        // 独自アイコン未設定の場合はDiscordのデフォルトアイコンを使用
+        const defaultIndex = targetUser.discriminator && targetUser.discriminator !== '0'
+          ? Number(targetUser.discriminator) % 5
+          : Number((BigInt(targetUser.id) >> 22n) % 6n);
+        avatarUrl = `https://cdn.discordapp.com/embed/avatars/${defaultIndex}.png`;
+      }
+
+      return { content: `📸 **${targetUser.username}** のアイコン画像はこちら！\n${avatarUrl}` };
     }
   },
   {
@@ -160,8 +177,23 @@ async function verifyDiscordSignature(request, publicKey) {
 // ==========================================
 // ⚙️ メイン処理
 // ==========================================
+// FormDataかJSONかを自動判定してDiscordへ返信/編集する共通処理
+function buildReplyBody(replyResult) {
+  if (replyResult.file) {
+    const formData = new FormData();
+    formData.append('payload_json', JSON.stringify({ content: replyResult.content }));
+    const blob = new Blob([replyResult.file.buffer], { type: replyResult.file.type });
+    formData.append('files[0]', blob, replyResult.file.name);
+    return { body: formData, headers: {} };
+  }
+  return {
+    body: JSON.stringify({ content: replyResult.content }),
+    headers: { 'Content-Type': 'application/json' },
+  };
+}
+
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     // コマンド登録用URL
@@ -208,35 +240,53 @@ export default {
 
       const matchedCommand = COMMANDS_LIST.find(cmd => cmd.name === commandName);
 
-      let replyResult = { content: "未実装のコマンドです。" };
-      if (matchedCommand && typeof matchedCommand.execute === 'function') {
-        replyResult = await matchedCommand.execute(options, user, interaction);
+      if (!matchedCommand || typeof matchedCommand.execute !== 'function') {
+        return new Response(
+          JSON.stringify({ type: 4, data: { content: "未実装のコマンドです。" } }),
+          { headers: { 'content-type': 'application/json' } }
+        );
       }
 
-      // ファイル添付（画像送信）がある場合の処理
+      // 外部通信などで3秒(Discordの応答期限)を超える可能性があるコマンドは、
+      // 先に「考え中...」を返してから、後でWebhook経由で本来の返信に編集する
+      if (matchedCommand.deferred) {
+        ctx.waitUntil((async () => {
+          let replyResult;
+          try {
+            replyResult = await matchedCommand.execute(options, user, interaction);
+          } catch (err) {
+            replyResult = { content: `❌ エラーが発生しました: ${err.message}` };
+          }
+
+          const followupUrl = `https://discord.com/api/v10/webhooks/${env.DISCORD_APPLICATION_ID}/${interaction.token}/messages/@original`;
+          const { body, headers } = buildReplyBody(replyResult);
+          await fetch(followupUrl, { method: 'PATCH', body, headers });
+        })());
+
+        return new Response(
+          JSON.stringify({ type: 5 }), // DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE
+          { headers: { 'content-type': 'application/json' } }
+        );
+      }
+
+      // 通常コマンド：すぐに実行して即レスポンス
+      let replyResult;
+      try {
+        replyResult = await matchedCommand.execute(options, user, interaction);
+      } catch (err) {
+        replyResult = { content: `❌ エラーが発生しました: ${err.message}` };
+      }
+
       if (replyResult.file) {
         const formData = new FormData();
-        
-        formData.append(
-          'payload_json',
-          JSON.stringify({
-            type: 4,
-            data: { content: replyResult.content }
-          })
-        );
-        
+        formData.append('payload_json', JSON.stringify({ type: 4, data: { content: replyResult.content } }));
         const blob = new Blob([replyResult.file.buffer], { type: replyResult.file.type });
         formData.append('files[0]', blob, replyResult.file.name);
-
         return new Response(formData);
       }
 
-      // 通常のテキストレスポンス
       return new Response(
-        JSON.stringify({
-          type: 4,
-          data: { content: replyResult.content },
-        }),
+        JSON.stringify({ type: 4, data: { content: replyResult.content } }),
         { headers: { 'content-type': 'application/json' } }
       );
     }
