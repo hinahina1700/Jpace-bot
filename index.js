@@ -66,6 +66,18 @@ const WPLACE_COLORS = [
   { key: 'light_slate', name: 'light slate', hex: 'B3B9D1' },
 ];
 
+// パネル表示用：画像と同じ「横の並び順(行)」を再現するためのグループ定義
+const WPLACE_COLOR_ROWS = [
+  ['black', 'dark_gray', 'gray', 'light_gray', 'white', 'deep_red', 'red', 'orange'],
+  ['gold', 'yellow', 'light_yellow', 'dark_green', 'green', 'light_green', 'dark_teal', 'teal'],
+  ['light_teal', 'dark_blue', 'blue', 'cyan', 'indigo', 'light_indigo', 'dark_purple', 'purple'],
+  ['light_purple', 'dark_pink', 'pink', 'light_pink', 'dark_brown', 'brown', 'beige'],
+  ['medium_gray', 'dark_red', 'light_red', 'dark_orange', 'dark_goldenrod', 'goldenrod', 'light_goldenrod', 'dark_olive'],
+  ['olive', 'light_olive', 'dark_cyan', 'light_cyan', 'dark_indigo', 'dark_slate_blue', 'slate_blue'],
+  ['light_slate_blue', 'dark_peach', 'peach', 'light_peach', 'dark_tan', 'tan', 'light_tan'],
+  ['dark_beige', 'light_beige', 'dark_stone', 'stone', 'light_stone', 'dark_slate', 'slate', 'light_slate'],
+];
+
 // パネル表示用に近い色の四角い絵文字を選ぶ（簡易的な視覚表現）
 const SWATCH_EMOJIS = [
   { emoji: '⬛', rgb: [0, 0, 0] },
@@ -120,38 +132,56 @@ const COMMANDS_LIST = [
   // --- システム・基本ツール系 ---
   {
     name: 'ping',
-    description: 'Botが生きているか確認します。',
-    execute: () => ({ content: '🏓 Pong! Botは正常に動作しています。' })
+    description: 'Botの応答速度を確認します。',
+    execute: (options, user, interaction) => {
+      // interactionのsnowflake IDから作成時刻を逆算し、Discord→Bot間の応答遅延を算出
+      const createdMs = Number((BigInt(interaction.id) >> 22n) + 1420070400000n);
+      const latencyMs = Date.now() - createdMs;
+      return { content: `🏓 Pong！\n⏱️ 応答速度: \`${latencyMs}ms\`` };
+    }
   },
   {
     name: 'help',
     description: '利用可能なコマンドの一覧を表示します。',
-    execute: () => ({ content: '📚 **Botコマンドヘルプ**\n以下のコマンドが利用可能です！\n`/now`, `/avatar`, `/server_info`, `/user_info`, `/add_role`, `/color_panel`, `/ping` を試してみてね！' })
+    execute: () => ({ content: '📚 **Botコマンドヘルプ**\n以下のコマンドが利用可能です！\n`/now`, `/avatar`, `/server_info`, `/user_info`, `/add_role`, `/color_panel`, `/role_directory`, `/color_match`, `/ping` を試してみてね！' })
   },
   
   // --- 【新設】現在の状況を表示するコマンド ---
   {
     name: 'now',
-    description: '現在のキャンバスの状況を画像として生成し、表示します。',
+    description: '指定した座標(省略時はデフォルト座標)のwplaceタイル画像を表示します。',
+    options: [
+      { type: 4, name: 'x', description: 'タイルX座標（省略時: 1879 / 0〜2047）', required: false },
+      { type: 4, name: 'y', description: 'タイルY座標（省略時: 785）', required: false },
+    ],
     // 外部APIからの画像取得に3秒以上かかることがあるため、
     // Discordの応答タイムアウト(3秒)を回避するために deferred 応答を使う
     deferred: true,
-    execute: async () => {
-      // 注目の中心タイル(1879, 785)をダイレクトに取得して返します。
-      const tileX = 1879;
-      const tileY = 785;
+    execute: async (options) => {
+      const tileX = options?.find(o => o.name === 'x')?.value ?? 1879;
+      const tileY = options?.find(o => o.name === 'y')?.value ?? 785;
       const targetUrl = `https://backend.wplace.live/files/s0/tiles/${tileX}/${tileY}.png`;
-      
+
       try {
         const imageRes = await fetch(targetUrl);
-        if (!imageRes.ok) throw new Error('タイルの取得に失敗しました');
+        if (!imageRes.ok) {
+          // ステータスコードを表示することで「座標が存在しない(404等)」ことが分かるようにする
+          return {
+            content:
+              `❌ タイル画像の取得に失敗しました (HTTP ${imageRes.status})\n` +
+              `座標: (${tileX}, ${tileY})\n` +
+              `URL: ${targetUrl}\n` +
+              `座標が範囲外か、まだ何も描かれていないタイルの可能性があります。\n` +
+              `\`/now x:<X> y:<Y>\` で自分の知っている座標を指定してみてください。`,
+          };
+        }
         const imageBuffer = await imageRes.arrayBuffer();
 
         return {
-          content: `🖼 **現在の状況（座標: ${tileX}, ${tileY} 付近）**`,
+          content: `🖼 **wplaceタイル（座標: ${tileX}, ${tileY}）**`,
           file: {
             buffer: imageBuffer,
-            name: 'current_status.png',
+            name: `tile_${tileX}_${tileY}.png`,
             type: 'image/png'
           }
         };
@@ -337,7 +367,33 @@ const COMMANDS_LIST = [
   },
   {
     name: 'color_panel',
-    description: 'wplace標準カラーパレット一覧と、サーバー内で使われているロールを表示します。',
+    description: 'wplace標準カラーパレットを、画像と同じ並び順のパネル形式で表示します。',
+    execute: () => {
+      // 画像の行(横並び)順そのままにフィールド化する
+      const fields = WPLACE_COLOR_ROWS.map((rowKeys, i) => {
+        const line = rowKeys
+          .map(key => {
+            const c = WPLACE_COLORS.find(cc => cc.key === key);
+            return `${nearestSwatchEmoji(c.hex)}\`${c.hex}\``;
+          })
+          .join(' ');
+        return { name: `Row ${i + 1}`, value: line, inline: false };
+      });
+
+      return {
+        embeds: [{
+          title: '🎨 カラーパネル（wplace標準色 / 画像と同じ並び順）',
+          description: '各色の名前は `/add_role` の色選択候補（入力補完）から確認できます。',
+          fields,
+          color: 0x2b2d31,
+          footer: { text: `全${WPLACE_COLORS.length}色 ・ /add_role で好きな色のロールを作成できます` },
+        }],
+      };
+    },
+  },
+  {
+    name: 'role_directory',
+    description: 'サーバー内で実際に作成されているwplaceカラーロールの一覧（ディレクトリ）を表示します。',
     deferred: true,
     execute: async (options, currentUser, interaction, env) => {
       const guildId = interaction.guild_id;
@@ -349,27 +405,66 @@ const COMMANDS_LIST = [
       }
       const guildRoles = await rolesRes.json();
 
-      const lines = WPLACE_COLORS.map(c => {
-        const colorInt = parseInt(c.hex, 16);
-        const matched = guildRoles.find(r => r.color === colorInt);
-        const swatch = nearestSwatchEmoji(c.hex);
-        const roleText = matched ? `<@&${matched.id}>` : '`未使用`';
-        return `${swatch} \`#${c.hex}\` **${c.name}** — ${roleText}`;
-      });
+      const matchedEntries = WPLACE_COLORS
+        .map(c => {
+          const role = guildRoles.find(r => r.color === parseInt(c.hex, 16));
+          return role ? { color: c, role } : null;
+        })
+        .filter(Boolean);
 
-      // Discordのembed description上限(4096文字)を考慮してチャンク分割
+      if (matchedEntries.length === 0) {
+        return { content: '📋 まだwplaceカラーのロールはありません。`/add_role` で最初のロールを作ってみましょう！' };
+      }
+
+      const lines = matchedEntries.map(({ color, role }) =>
+        `${nearestSwatchEmoji(color.hex)} \`#${color.hex}\` **${color.name}** → <@&${role.id}>`
+      );
+
       const chunkSize = 20;
       const embeds = [];
       for (let i = 0; i < lines.length; i += chunkSize) {
         embeds.push({
-          title: i === 0 ? '🎨 カラーパネル（wplace標準色）' : undefined,
+          title: i === 0 ? `📋 ロールディレクトリ（${matchedEntries.length}件）` : undefined,
           description: lines.slice(i, i + chunkSize).join('\n'),
           color: 0x2b2d31,
-          footer: i + chunkSize >= lines.length ? { text: '/add_role で好きな色のロールを作成できます' } : undefined,
         });
       }
 
-      return { content: '', embeds };
+      return { embeds };
+    },
+  },
+  {
+    name: 'color_match',
+    description: '指定したHexカラーに最も近いwplace標準色を検索します（ドット絵の色選びに便利）。',
+    options: [
+      { type: 3, name: 'hex', description: 'カラーコードを入力（例: 1a2b3c）', required: true },
+    ],
+    execute: (options) => {
+      const raw = options?.find(o => o.name === 'hex')?.value?.trim().replace(/^#/, '');
+      if (!raw || !/^[0-9a-fA-F]{6}$/.test(raw)) {
+        return { content: '❌ 6桁の16進数カラーコードを指定してください（例: `1a2b3c`）。' };
+      }
+      const input = raw.toUpperCase();
+      const [r, g, b] = hexToRgb(input);
+
+      let best = null;
+      let bestDist = Infinity;
+      for (const c of WPLACE_COLORS) {
+        const [cr, cg, cb] = hexToRgb(c.hex);
+        const d = (r - cr) ** 2 + (g - cg) ** 2 + (b - cb) ** 2;
+        if (d < bestDist) {
+          bestDist = d;
+          best = c;
+        }
+      }
+
+      const swatch = nearestSwatchEmoji(best.hex);
+      return {
+        content:
+          `🎨 入力カラー: \`#${input}\`\n` +
+          `→ 最も近いwplaceカラー: ${swatch} **${best.name}** \`#${best.hex}\`\n` +
+          `\`/add_role color:${best.name}\` で、このカラーのロールを作成できます。`,
+      };
     },
   },
 ];
@@ -424,6 +519,17 @@ function buildReplyBody(replyResult) {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+
+    // 必須の環境変数(Secrets)が設定されているか確認
+    // 未設定だと署名検証やAPI通信が必ず失敗し、「応答しませんでした」の原因になる
+    const missingEnv = ['DISCORD_APPLICATION_ID', 'DISCORD_TOKEN', 'DISCORD_PUBLIC_KEY']
+      .filter(key => !env[key]);
+    if (missingEnv.length > 0) {
+      const message = `❌ 環境変数(Secrets)が未設定です: ${missingEnv.join(', ')}\n` +
+        `Cloudflareダッシュボード（Workers & Pages → 対象Worker → Settings → Variables and Secrets）か、` +
+        `\`npx wrangler secret put ${missingEnv[0]}\` などで設定し、再デプロイしてください。`;
+      return new Response(message, { status: 500 });
+    }
 
     // コマンド登録用URL
     if (url.pathname === '/register') {
