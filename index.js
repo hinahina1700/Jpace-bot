@@ -1,4 +1,6 @@
-import init, { PhotonImage } from 'photon-wasm';
+// ❌ 修正前: import init, { PhotonImage } from 'photon-wasm';
+// ✅ 修正後: 名前付きインポートに変更
+import { init, PhotonImage } from 'photon-wasm';
 
 const CHANNEL_ID = '1507371465744580739';
 
@@ -88,8 +90,10 @@ function hexToRgb(hex) {
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function createMergedImage() {
-  // Wasmモジュールの初期化（引数なしで呼び出し）
-  await init();
+  // Wasmモジュールの初期化（init関数が存在する場合のみ実行）
+  if (typeof init === 'function') {
+    await init();
+  }
 
   const cropX = 922;
   const cropY = 364;
@@ -466,7 +470,7 @@ const COMMANDS_LIST = [
       }
 
       const lines = matchedEntries.map(({ color, role }) =>
-        `<@&${role.id}> (\`#${color.hex}\` / **${color.name}**)`
+        `<@&${role.id}> (\`#${color.hex}\` / **${color.name}**) `
       );
 
       const chunkSize = 20;
