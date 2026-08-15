@@ -1,6 +1,6 @@
 // ❌ 修正前: import init, { PhotonImage } from 'photon-wasm';
 // ✅ 修正後: 名前付きインポートに変更
-import { init, PhotonImage } from 'photon-wasm';
+import initPhoton, { PhotonImage } from 'photon-wasm';
 
 const CHANNEL_ID = '1507371465744580739';
 
