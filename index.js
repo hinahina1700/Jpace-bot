@@ -1,4 +1,4 @@
-import initPhoton, { PhotonImage } from 'photon-wasm';
+import { PhotonImage } from 'photon-wasm';
 
 const CHANNEL_ID = '1507371465744580739';
 
@@ -87,22 +87,7 @@ function hexToRgb(hex) {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Wasm初期化のキャッシュ
-let photonInitPromise = null;
-function ensurePhotonInitialized() {
-  if (!photonInitPromise) {
-    if (typeof initPhoton === 'function') {
-      photonInitPromise = initPhoton();
-    } else {
-      photonInitPromise = Promise.resolve();
-    }
-  }
-  return photonInitPromise;
-}
-
 async function createMergedImage() {
-  await ensurePhotonInitialized();
-
   const cropX = 922;
   const cropY = 364;
   const cropWidth = 3866 - 922;
