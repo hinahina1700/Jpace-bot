@@ -1,5 +1,4 @@
 import init, { PhotonImage } from 'photon-wasm';
-import photonWasm from 'photon-wasm/photon_wasm_bg.wasm';
 
 const CHANNEL_ID = '1507371465744580739';
 
@@ -89,8 +88,8 @@ function hexToRgb(hex) {
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function createMergedImage() {
-  // Wasmモジュールの初期化
-  await init(photonWasm);
+  // Wasmモジュールの初期化（引数なしで呼び出し）
+  await init();
 
   const cropX = 922;
   const cropY = 364;
@@ -521,7 +520,7 @@ const COMMANDS_LIST = [
 async function verifyDiscordSignature(requestBodyText, signature, timestamp, publicKey) {
   if (!signature || !timestamp || !publicKey) return false;
   try {
-    const pubKeyBuf = new Uint8Array(publicKey.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
+    const pubKeyBuf = new Uint8Array(signature.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
     const sigBuf = new Uint8Array(signature.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
     const dataBuf = new TextEncoder().encode(timestamp + requestBodyText);
 
