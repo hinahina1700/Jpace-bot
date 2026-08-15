@@ -1,5 +1,7 @@
 import { PhotonImage } from 'photon-wasm';
 
+const CHANNEL_ID = '1507371465744580739';
+
 // ==========================================
 // 🎨 wplace標準カラーパレット
 // ==========================================
@@ -91,7 +93,6 @@ async function createMergedImage() {
   const cropWidth = 3866 - 922;
   const cropHeight = 3904 - 364;
 
-  // キャンバスの初期化 (138, 172, 246, 255)
   const canvasBuffer = new Uint8Array(cropWidth * cropHeight * 4);
   for (let i = 0; i < canvasBuffer.length; i += 4) {
     canvasBuffer[i] = 138;     // R
@@ -163,7 +164,7 @@ const COMMANDS_LIST = [
   {
     name: 'help',
     description: '利用可能なコマンドの一覧を表示します。',
-    execute: () => ({ content: '📚 **Botコマンドヘルプ**\n`/now`, `/avatar`, `/server_info`, `/user_info`, `/add_role`, `/setup_color_roles`, `/color_panel`, `/role_directory`, `/color_match`, `/ping` が利用可能です。' })
+    execute: () => ({ content: '📚 **Botコマンドヘルプ**\n`/now`, `/post_now`, `/avatar`, `/server_info`, `/user_info`, `/add_role`, `/setup_color_roles`, `/color_panel`, `/role_directory`, `/color_match`, `/ping` が利用可能です。' })
   },
   {
     name: 'now',
@@ -182,6 +183,40 @@ const COMMANDS_LIST = [
         };
       } catch (err) {
         return { content: `❌ 画像の取得・合成中にエラーが発生しました: ${err.message}` };
+      }
+    }
+  },
+  {
+    name: 'post_now',
+    description: '指定された専用チャンネルにjplace画像を送信します。',
+    deferred: true,
+    execute: async (options, user, interaction, env) => {
+      try {
+        const imageBuffer = await createMergedImage();
+        const replyResult = {
+          content: '🖼 **現在のjplaceの画像です**',
+          file: {
+            buffer: imageBuffer,
+            name: 'jplace.png',
+            type: 'image/png'
+          }
+        };
+
+        const { body, headers } = buildReplyBody(replyResult);
+        const postRes = await discordApi(env, `/channels/${CHANNEL_ID}/messages`, {
+          method: 'POST',
+          body,
+          headers,
+        });
+
+        if (postRes.ok) {
+          return { content: `✅ <#${CHANNEL_ID}> に画像を送信しました！` };
+        } else {
+          const errText = await postRes.text();
+          return { content: `❌ チャンネルへの送信に失敗しました:\n\`${errText}\`` };
+        }
+      } catch (err) {
+        return { content: `❌ エラーが発生しました: ${err.message}` };
       }
     }
   },
@@ -518,6 +553,32 @@ function buildReplyBody(replyResult) {
 }
 
 export default {
+  // 定期送信（Cron Trigger）処理
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil((async () => {
+      try {
+        const imageBuffer = await createMergedImage();
+        const replyResult = {
+          content: '🖼 **定期送信 (jplace画像)**',
+          file: {
+            buffer: imageBuffer,
+            name: 'jplace.png',
+            type: 'image/png'
+          }
+        };
+
+        const { body, headers } = buildReplyBody(replyResult);
+        await discordApi(env, `/channels/${CHANNEL_ID}/messages`, {
+          method: 'POST',
+          body,
+          headers,
+        });
+      } catch (err) {
+        console.error('自動配信エラー:', err);
+      }
+    })());
+  },
+
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
