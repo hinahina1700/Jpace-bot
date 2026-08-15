@@ -83,11 +83,20 @@ function hexToRgb(hex) {
   return [(int >> 16) & 255, (int >> 8) & 255, int & 255];
 }
 
+// メモリスリープ用ヘルパー
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 // ==========================================
 // 🖼️ 16枚のタイルを並列取得・合成・クロップする処理
 // ==========================================
 async function createMergedImage() {
-  const canvas = new Image(4000, 4000);
+  const cropX = 922;
+  const cropY = 364;
+  const cropWidth = 3866 - 922;  // 2944
+  const cropHeight = 3904 - 364; // 3540
+
+  // メモリ節約のため最初からクロップ後のサイズで作成
+  const canvas = new Image(cropWidth, cropHeight);
   canvas.fill(Image.rgbaToColor(138, 172, 246, 255));
 
   const fetchPromises = [];
@@ -113,18 +122,14 @@ async function createMergedImage() {
   const results = await Promise.all(fetchPromises);
   for (const item of results) {
     if (item && item.tileImg) {
-      canvas.composite(item.tileImg, item.x * 1000, item.y * 1000);
+      // クロップ座標(cropX, cropY)からの相関位置に描画
+      const posX = item.x * 1000 - cropX;
+      const posY = item.y * 1000 - cropY;
+      canvas.composite(item.tileImg, posX, posY);
     }
   }
 
-  const cropX = 922;
-  const cropY = 364;
-  const cropWidth = 3866 - 922;  // 2944
-  const cropHeight = 3904 - 364; // 3540
-
-  const cropped = canvas.crop(cropX, cropY, cropWidth, cropHeight);
-  const encodedPng = await cropped.encode(1);
-
+  const encodedPng = await canvas.encode(1);
   return encodedPng.buffer;
 }
 
@@ -346,7 +351,11 @@ const COMMANDS_LIST = [
             method: 'POST',
             body: JSON.stringify({ name: colorInfo.name, color: colorInt, mentionable: true }),
           });
-          if (createRes.ok) createdCount++;
+          if (createRes.ok) {
+            createdCount++;
+            // レートリミット回避用のミリ秒待機
+            await sleep(200);
+          }
         }
       }
 
@@ -532,8 +541,28 @@ export default {
     // コマンド一括登録用URL (/register)
     if (url.pathname === '/register') {
       const registerUrl = `https://discord.com/api/v10/applications/${env.DISCORD_APPLICATION_ID}/commands`;
-      const cleanCommands = COMMANDS_LIST.map(({ name, description, options }) => ({ name, description, options }));
       
+      // Discord API の要求に合うようオブジェクトを正規化
+      const cleanCommands = COMMANDS_LIST.map(cmd => {
+        const cleaned = {
+          name: cmd.name,
+          description: cmd.description,
+        };
+        if (cmd.options) {
+          cleaned.options = cmd.options.map(opt => {
+            const cleanOpt = {
+              type: opt.type,
+              name: opt.name,
+              description: opt.description,
+            };
+            if (typeof opt.required === 'boolean') cleanOpt.required = opt.required;
+            if (typeof opt.autocomplete === 'boolean') cleanOpt.autocomplete = opt.autocomplete;
+            return cleanOpt;
+          });
+        }
+        return cleaned;
+      });
+
       const response = await fetch(registerUrl, {
         method: 'PUT',
         headers: {
