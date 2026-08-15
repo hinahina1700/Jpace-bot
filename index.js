@@ -1,4 +1,5 @@
-import { PhotonImage } from 'photon-wasm';
+import init, { PhotonImage } from 'photon-wasm';
+import photonWasm from 'photon-wasm/photon_wasm_bg.wasm';
 
 const CHANNEL_ID = '1507371465744580739';
 
@@ -88,6 +89,9 @@ function hexToRgb(hex) {
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function createMergedImage() {
+  // Wasmモジュールの初期化
+  await init(photonWasm);
+
   const cropX = 922;
   const cropY = 364;
   const cropWidth = 3866 - 922;
