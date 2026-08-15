@@ -1,4 +1,4 @@
-import { Image } from 'imagescript/v1-wasm';
+import { Image } from 'imagescript';
 
 // ==========================================
 // 🎨 wplace標準カラーパレット
