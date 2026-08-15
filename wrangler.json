@@ -4,12 +4,5 @@
   "compatibility_date": "2026-07-13",
   "compatibility_flags": [
     "nodejs_compat"
-  ],
-  "rules": [
-    {
-      "type": "Data",
-      "globs": ["**/*.node"],
-      "fallthrough": true
-    }
   ]
 }
