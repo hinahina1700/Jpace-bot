@@ -6,6 +6,6 @@
     "nodejs_compat"
   ],
   "alias": {
-    "imagescript/v1-wasm": "imagescript/v1-wasm"
+    "imagescript/v1-wasm": "imagescript/v1-wasm/index.js"
   }
 }
