@@ -1,4 +1,4 @@
-import { Image } from 'imagescript/v1/index.wasm.js';
+import { PhotonImage } from '@photon-rs/photon-wasm';
 
 // ==========================================
 // 🎨 wplace標準カラーパレット
@@ -91,8 +91,16 @@ async function createMergedImage() {
   const cropWidth = 3866 - 922;
   const cropHeight = 3904 - 364;
 
-  const canvas = new Image(cropWidth, cropHeight);
-  canvas.fill(Image.rgbaToColor(138, 172, 246, 255));
+  // キャンバスの初期化 (138, 172, 246, 255)
+  const canvasBuffer = new Uint8Array(cropWidth * cropHeight * 4);
+  for (let i = 0; i < canvasBuffer.length; i += 4) {
+    canvasBuffer[i] = 138;     // R
+    canvasBuffer[i + 1] = 172; // G
+    canvasBuffer[i + 2] = 246; // B
+    canvasBuffer[i + 3] = 255; // A
+  }
+
+  const canvas = new PhotonImage(canvasBuffer, cropWidth, cropHeight);
 
   const fetchPromises = [];
   for (let y = 0; y < 4; y++) {
@@ -106,7 +114,8 @@ async function createMergedImage() {
           .then(async (res) => {
             if (!res.ok) return null;
             const arrayBuffer = await res.arrayBuffer();
-            const tileImg = await Image.decode(new Uint8Array(arrayBuffer));
+            const bytes = new Uint8Array(arrayBuffer);
+            const tileImg = PhotonImage.new_from_byteslice(bytes);
             return { tileImg, x, y };
           })
           .catch(() => null)
@@ -119,12 +128,14 @@ async function createMergedImage() {
     if (item && item.tileImg) {
       const posX = item.x * 1000 - cropX;
       const posY = item.y * 1000 - cropY;
-      canvas.composite(item.tileImg, posX, posY);
+      canvas.blend(item.tileImg, posX, posY, 'over');
+      item.tileImg.free();
     }
   }
 
-  const encodedPng = await canvas.encode(1);
-  return encodedPng.buffer;
+  const outputBytes = canvas.get_bytes();
+  canvas.free();
+  return outputBytes.buffer;
 }
 
 async function discordApi(env, endpoint, options = {}) {
@@ -341,7 +352,7 @@ const COMMANDS_LIST = [
           });
           if (createRes.ok) {
             createdCount++;
-            await sleep(50); // 処理落ち防止のためウェイトを適正化
+            await sleep(50);
           }
         }
       }
