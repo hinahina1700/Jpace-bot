@@ -1,4 +1,4 @@
-import { Image } from 'imagescript/v8';
+import { Image } from 'imagescript/wasm';
 
 // ==========================================
 // 🎨 wplace標準カラーパレット
@@ -298,7 +298,6 @@ const COMMANDS_LIST = [
       const guildRoles = await rolesRes.json();
       let role = guildRoles.find(r => r.color === colorInt);
 
-      // ロールが存在しない場合は自動生成
       if (!role) {
         const createRes = await discordApi(env, `/guilds/${guildId}/roles`, {
           method: 'POST',
@@ -376,7 +375,6 @@ const COMMANDS_LIST = [
             const c = WPLACE_COLORS.find(cc => cc.key === key);
             const colorInt = parseInt(c.hex, 16);
             const role = guildRoles.find(r => r.color === colorInt && r.name !== '@everyone');
-            // ロールが存在すれば <@&ID> 埋め込み表示、無ければカラーコード表示
             return role ? `<@&${role.id}>` : `\`#${c.hex}\``;
           })
           .join(' ');
@@ -408,7 +406,6 @@ const COMMANDS_LIST = [
       }
       const guildRoles = await rolesRes.json();
 
-      // @everyone を除外してマッチング
       const matchedEntries = WPLACE_COLORS
         .map(c => {
           const colorInt = parseInt(c.hex, 16);
@@ -489,10 +486,13 @@ async function verifyDiscordSignature(request, publicKey) {
     const dataBuf = new TextEncoder().encode(timestamp + body);
 
     const cryptoKey = await crypto.subtle.importKey(
-      'raw', pubKeyBuf, { name: 'NODE-ED25519', namedCurve: 'NODE-ED25519' },
-      false, ['verify']
+      'raw',
+      pubKeyBuf,
+      { name: 'Ed25519', namedCurve: 'Ed25519' },
+      false,
+      ['verify']
     );
-    return await crypto.subtle.verify('NODE-ED25519', cryptoKey, sigBuf, dataBuf);
+    return await crypto.subtle.verify('Ed25519', cryptoKey, sigBuf, dataBuf);
   } catch (e) {
     return false;
   }
@@ -556,7 +556,7 @@ export default {
     if (!isValid) return new Response('Invalid request signature', { status: 401 });
 
     const interaction = await request.json();
-    
+
     // オートコンプリート機能
     if (interaction.type === 4) {
       const focusedOption =
