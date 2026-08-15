@@ -1,4 +1,4 @@
-import { PhotonImage } from '@photon-rs/photon-wasm';
+import { PhotonImage } from 'photon-wasm';
 
 // ==========================================
 // 🎨 wplace標準カラーパレット
