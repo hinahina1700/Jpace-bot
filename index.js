@@ -1,5 +1,3 @@
-// ❌ 修正前: import init, { PhotonImage } from 'photon-wasm';
-// ✅ 修正後: 名前付きインポートに変更
 import initPhoton, { PhotonImage } from 'photon-wasm';
 
 const CHANNEL_ID = '1507371465744580739';
@@ -89,11 +87,21 @@ function hexToRgb(hex) {
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-async function createMergedImage() {
-  // Wasmモジュールの初期化（init関数が存在する場合のみ実行）
-  if (typeof init === 'function') {
-    await init();
+// Wasm初期化のキャッシュ
+let photonInitPromise = null;
+function ensurePhotonInitialized() {
+  if (!photonInitPromise) {
+    if (typeof initPhoton === 'function') {
+      photonInitPromise = initPhoton();
+    } else {
+      photonInitPromise = Promise.resolve();
+    }
   }
+  return photonInitPromise;
+}
+
+async function createMergedImage() {
+  await ensurePhotonInitialized();
 
   const cropX = 922;
   const cropY = 364;
@@ -110,40 +118,46 @@ async function createMergedImage() {
 
   const canvas = new PhotonImage(canvasBuffer, cropWidth, cropHeight);
 
-  const fetchPromises = [];
-  for (let y = 0; y < 4; y++) {
-    for (let x = 0; x < 4; x++) {
-      const tileX = 1877 + x;
-      const tileY = 784 + y;
-      const url = `https://backend.wplace.live/files/s0/tiles/${tileX}/${tileY}.png`;
+  try {
+    const fetchPromises = [];
+    for (let y = 0; y < 4; y++) {
+      for (let x = 0; x < 4; x++) {
+        const tileX = 1877 + x;
+        const tileY = 784 + y;
+        const url = `https://backend.wplace.live/files/s0/tiles/${tileX}/${tileY}.png`;
 
-      fetchPromises.push(
-        fetch(url)
-          .then(async (res) => {
-            if (!res.ok) return null;
-            const arrayBuffer = await res.arrayBuffer();
-            const bytes = new Uint8Array(arrayBuffer);
-            const tileImg = PhotonImage.new_from_byteslice(bytes);
-            return { tileImg, x, y };
-          })
-          .catch(() => null)
-      );
+        fetchPromises.push(
+          fetch(url)
+            .then(async (res) => {
+              if (!res.ok) return null;
+              const arrayBuffer = await res.arrayBuffer();
+              const bytes = new Uint8Array(arrayBuffer);
+              const tileImg = PhotonImage.new_from_byteslice(bytes);
+              return { tileImg, x, y };
+            })
+            .catch(() => null)
+        );
+      }
     }
-  }
 
-  const results = await Promise.all(fetchPromises);
-  for (const item of results) {
-    if (item && item.tileImg) {
-      const posX = item.x * 1000 - cropX;
-      const posY = item.y * 1000 - cropY;
-      canvas.blend(item.tileImg, posX, posY, 'over');
-      item.tileImg.free();
+    const results = await Promise.all(fetchPromises);
+    for (const item of results) {
+      if (item && item.tileImg) {
+        try {
+          const posX = item.x * 1000 - cropX;
+          const posY = item.y * 1000 - cropY;
+          canvas.blend(item.tileImg, posX, posY, 'over');
+        } finally {
+          item.tileImg.free();
+        }
+      }
     }
-  }
 
-  const outputBytes = canvas.get_bytes();
-  canvas.free();
-  return outputBytes.buffer;
+    const outputBytes = canvas.get_bytes();
+    return outputBytes.buffer;
+  } finally {
+    canvas.free();
+  }
 }
 
 async function discordApi(env, endpoint, options = {}) {
@@ -524,7 +538,7 @@ const COMMANDS_LIST = [
 async function verifyDiscordSignature(requestBodyText, signature, timestamp, publicKey) {
   if (!signature || !timestamp || !publicKey) return false;
   try {
-    const pubKeyBuf = new Uint8Array(signature.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
+    const pubKeyBuf = new Uint8Array(publicKey.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
     const sigBuf = new Uint8Array(signature.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
     const dataBuf = new TextEncoder().encode(timestamp + requestBodyText);
 
@@ -646,6 +660,7 @@ export default {
 
     const interaction = JSON.parse(bodyText);
 
+    // オートコンプリート (TYPE 4)
     if (interaction.type === 4) {
       const focusedOption =
         interaction.data.options?.find(o => o.focused) ||
@@ -664,12 +679,14 @@ export default {
       );
     }
 
+    // Ping検証 (TYPE 1)
     if (interaction.type === 1) {
       return new Response(JSON.stringify({ type: 1 }), {
         headers: { 'content-type': 'application/json' },
       });
     }
 
+    // コマンド実行 (TYPE 2)
     if (interaction.type === 2) {
       const commandName = interaction.data.name;
       const options = interaction.data.options;
