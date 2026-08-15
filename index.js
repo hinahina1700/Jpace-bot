@@ -83,19 +83,14 @@ function hexToRgb(hex) {
   return [(int >> 16) & 255, (int >> 8) & 255, int & 255];
 }
 
-// メモリスリープ用ヘルパー
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// ==========================================
-// 🖼️ 16枚のタイルを並列取得・合成・クロップする処理
-// ==========================================
 async function createMergedImage() {
   const cropX = 922;
   const cropY = 364;
-  const cropWidth = 3866 - 922;  // 2944
-  const cropHeight = 3904 - 364; // 3540
+  const cropWidth = 3866 - 922;
+  const cropHeight = 3904 - 364;
 
-  // メモリ節約のため最初からクロップ後のサイズで作成
   const canvas = new Image(cropWidth, cropHeight);
   canvas.fill(Image.rgbaToColor(138, 172, 246, 255));
 
@@ -122,7 +117,6 @@ async function createMergedImage() {
   const results = await Promise.all(fetchPromises);
   for (const item of results) {
     if (item && item.tileImg) {
-      // クロップ座標(cropX, cropY)からの相関位置に描画
       const posX = item.x * 1000 - cropX;
       const posY = item.y * 1000 - cropY;
       canvas.composite(item.tileImg, posX, posY);
@@ -133,9 +127,6 @@ async function createMergedImage() {
   return encodedPng.buffer;
 }
 
-// ==========================================
-// 🔧 Discord REST API 呼び出し用ヘルパー
-// ==========================================
 async function discordApi(env, endpoint, options = {}) {
   const res = await fetch(`https://discord.com/api/v10${endpoint}`, {
     ...options,
@@ -148,9 +139,6 @@ async function discordApi(env, endpoint, options = {}) {
   return res;
 }
 
-// ==========================================
-// 📋 コマンド一覧の定義
-// ==========================================
 const COMMANDS_LIST = [
   {
     name: 'ping',
@@ -353,8 +341,7 @@ const COMMANDS_LIST = [
           });
           if (createRes.ok) {
             createdCount++;
-            // レートリミット回避用のミリ秒待機
-            await sleep(200);
+            await sleep(50); // 処理落ち防止のためウェイトを適正化
           }
         }
       }
@@ -382,10 +369,12 @@ const COMMANDS_LIST = [
         const line = rowKeys
           .map(key => {
             const c = WPLACE_COLORS.find(cc => cc.key === key);
+            if (!c) return '';
             const colorInt = parseInt(c.hex, 16);
             const role = guildRoles.find(r => r.color === colorInt && r.name !== '@everyone');
             return role ? `<@&${role.id}>` : `\`#${c.hex}\``;
           })
+          .filter(Boolean)
           .join(' ');
         return { name: `Row ${i + 1}`, value: line, inline: false };
       });
@@ -479,20 +468,12 @@ const COMMANDS_LIST = [
   },
 ];
 
-// ==========================================
-// 🔒 署名検証システム
-// ==========================================
-async function verifyDiscordSignature(request, publicKey) {
-  const signature = request.headers.get('x-signature-ed25519');
-  const timestamp = request.headers.get('x-signature-timestamp');
-  const body = await request.clone().text();
-
-  if (!signature || !timestamp) return false;
-
+async function verifyDiscordSignature(requestBodyText, signature, timestamp, publicKey) {
+  if (!signature || !timestamp || !publicKey) return false;
   try {
     const pubKeyBuf = new Uint8Array(publicKey.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
     const sigBuf = new Uint8Array(signature.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
-    const dataBuf = new TextEncoder().encode(timestamp + body);
+    const dataBuf = new TextEncoder().encode(timestamp + requestBodyText);
 
     const cryptoKey = await crypto.subtle.importKey(
       'raw',
@@ -507,9 +488,6 @@ async function verifyDiscordSignature(request, publicKey) {
   }
 }
 
-// ==========================================
-// ⚙️ メイン処理
-// ==========================================
 function buildReplyBody(replyResult) {
   const payload = {};
   if (replyResult.content) payload.content = replyResult.content;
@@ -538,11 +516,9 @@ export default {
       return new Response(`❌ 環境変数が未設定です: ${missingEnv.join(', ')}`, { status: 500 });
     }
 
-    // コマンド一括登録用URL (/register)
     if (url.pathname === '/register') {
       const registerUrl = `https://discord.com/api/v10/applications/${env.DISCORD_APPLICATION_ID}/commands`;
       
-      // Discord API の要求に合うようオブジェクトを正規化
       const cleanCommands = COMMANDS_LIST.map(cmd => {
         const cleaned = {
           name: cmd.name,
@@ -581,12 +557,16 @@ export default {
     }
 
     if (request.method !== 'POST') return new Response('Method Not Allowed', { status: 405 });
-    const isValid = await verifyDiscordSignature(request, env.DISCORD_PUBLIC_KEY);
+
+    const signature = request.headers.get('x-signature-ed25519');
+    const timestamp = request.headers.get('x-signature-timestamp');
+    const bodyText = await request.text();
+
+    const isValid = await verifyDiscordSignature(bodyText, signature, timestamp, env.DISCORD_PUBLIC_KEY);
     if (!isValid) return new Response('Invalid request signature', { status: 401 });
 
-    const interaction = await request.json();
+    const interaction = JSON.parse(bodyText);
 
-    // オートコンプリート機能
     if (interaction.type === 4) {
       const focusedOption =
         interaction.data.options?.find(o => o.focused) ||
@@ -605,14 +585,12 @@ export default {
       );
     }
 
-    // PING (Discordからの死活確認)
     if (interaction.type === 1) {
       return new Response(JSON.stringify({ type: 1 }), {
         headers: { 'content-type': 'application/json' },
       });
     }
 
-    // コマンド実行 (Slash Commands)
     if (interaction.type === 2) {
       const commandName = interaction.data.name;
       const options = interaction.data.options;
