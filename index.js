@@ -1,12 +1,22 @@
-import { PhotonImage } from 'photon-wasm';
+import init, { PhotonImage } from 'photon-wasm';
+import photonWasm from 'photon-wasm/photon_rs_bg.wasm';
 
 const CHANNEL_ID = '1507371465744580739';
+
+// Wasmの初期化フラグと読み込み関数
+let wasmInitialized = false;
+async function ensureWasmInit() {
+  if (!wasmInitialized) {
+    await init(photonWasm);
+    wasmInitialized = true;
+  }
+}
 
 // ==========================================
 // 🎨 wplace標準カラーパレット
 // ==========================================
 const WPLACE_COLORS = [
-  { key: 'black', name: 'black', hex: '000000' },
+  { key: 'black', name: 'black', hex: '000001' },
   { key: 'dark_gray', name: 'dark gray', hex: '3C3C3C' },
   { key: 'gray', name: 'gray', hex: '787878' },
   { key: 'light_gray', name: 'light gray', hex: 'D2D2D2' },
@@ -88,17 +98,21 @@ function hexToRgb(hex) {
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function createMergedImage() {
+  // Wasmの完全な初期化チェック
+  await ensureWasmInit();
+
   const cropX = 922;
   const cropY = 364;
   const cropWidth = 3866 - 922;
   const cropHeight = 3904 - 364;
 
+  // キャンバスの初期色を #8aacf6 (138, 172, 246, 255) に設定
   const canvasBuffer = new Uint8Array(cropWidth * cropHeight * 4);
   for (let i = 0; i < canvasBuffer.length; i += 4) {
     canvasBuffer[i] = 138;     // R
     canvasBuffer[i + 1] = 172; // G
     canvasBuffer[i + 2] = 246; // B
-    canvasBuffer[i + 3] = 255; // A
+    canvasBuffer[i + 3] = 255; // Alpha
   }
 
   const canvas = new PhotonImage(canvasBuffer, cropWidth, cropHeight);
@@ -114,6 +128,7 @@ async function createMergedImage() {
         fetchPromises.push(
           fetch(url)
             .then(async (res) => {
+              // 404など何も書いていないタイルは正常としてスキップ（背景色#8aacf6を残す）
               if (!res.ok) return null;
               const arrayBuffer = await res.arrayBuffer();
               const bytes = new Uint8Array(arrayBuffer);
@@ -133,7 +148,7 @@ async function createMergedImage() {
           const posY = item.y * 1000 - cropY;
           canvas.blend(item.tileImg, posX, posY, 'over');
         } finally {
-          item.tileImg.free();
+          item.tileImg.free(); // 個別タイルのメモリ解放
         }
       }
     }
@@ -141,7 +156,7 @@ async function createMergedImage() {
     const outputBytes = canvas.get_bytes();
     return outputBytes.buffer;
   } finally {
-    canvas.free();
+    canvas.free(); // メインキャンバスのメモリ解放
   }
 }
 
@@ -469,7 +484,7 @@ const COMMANDS_LIST = [
       }
 
       const lines = matchedEntries.map(({ color, role }) =>
-        `<@&${role.id}> (\`#${color.hex}\` / **${color.name}**) `
+        `<@&${role.id}> (\`#${color.hex}\` / **${color.name}**)`
       );
 
       const chunkSize = 20;
