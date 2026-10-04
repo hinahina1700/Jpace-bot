@@ -1,5 +1,5 @@
 import init, { PhotonImage } from 'photon-wasm';
-import photonWasm from 'photon-wasm/photon_rs_bg.wasm';
+import photonWasm from 'photon-wasm/photon_rs_bg_bg.wasm';
 
 const CHANNEL_ID = '1507371465744580739';
 
