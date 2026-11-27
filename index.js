@@ -1,7 +1,15 @@
 import init, { PhotonImage } from 'photon-wasm';
-import photonWasm from 'photon-wasm/photon_rs_bg_bg.wasm';
 
 const CHANNEL_ID = '1507371465744580739';
+
+// Wasm initialization guard
+let wasmInitialized = false;
+async function ensureWasmInit() {
+  if (!wasmInitialized) {
+    await init();
+    wasmInitialized = true;
+  }
+}
 
 // Components V2 Flags & Types
 const FLAG_IS_COMPONENTS_V2 = 32768;
