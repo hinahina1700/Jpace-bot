@@ -2,6 +2,15 @@ import { PhotonImage } from 'photon-wasm';
 
 const CHANNEL_ID = '1507371465744580739';
 
+// Discord Interaction Types & Response Types
+const INTERACTION_PING = 1;
+const INTERACTION_APPLICATION_COMMAND = 2;
+const INTERACTION_MESSAGE_COMPONENT = 3;
+
+const RESPONSE_PONG = 1;
+const RESPONSE_CHANNEL_MESSAGE_WITH_SOURCE = 4;
+const RESPONSE_UPDATE_MESSAGE = 7;
+
 // Components V2 Flags & Types
 const FLAG_IS_COMPONENTS_V2 = 32768;
 const FLAG_EPHEMERAL_V2 = 32768 | 64; // 32832
@@ -607,3 +616,192 @@ function buildSectorSelectRow(selectedArea = null) {
     }),
   ]);
 }
+
+// ==========================================
+// Discord Ed25519 Signature Verification
+// ==========================================
+function hexToUint8Array(hex) {
+  const clean = String(hex || '').trim();
+  const bytes = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+async function verifyDiscordSignature(request, rawBodyText, publicKeyHex) {
+  if (!publicKeyHex) return true; // 未設定時はローカル検証用に通過
+  const signatureHex = request.headers.get('x-signature-ed25519');
+  const timestamp = request.headers.get('x-signature-timestamp');
+  if (!signatureHex || !timestamp) return false;
+
+  try {
+    const key = await crypto.subtle.importKey(
+      'raw',
+      hexToUint8Array(publicKeyHex),
+      { name: 'Ed25519' },
+      false,
+      ['verify']
+    );
+    const msg = new TextEncoder().encode(timestamp + rawBodyText);
+    return await crypto.subtle.verify('Ed25519', key, hexToUint8Array(signatureHex), msg);
+  } catch {
+    return false;
+  }
+}
+
+// ==========================================
+// Interaction Handlers
+// ==========================================
+async function handleApplicationCommand(interaction, env) {
+  const cmdName = interaction.data?.name || '';
+
+  if (cmdName === 'map') {
+    const buffer = await createMergedImageBuffer();
+    const filename = 'jplace-map.png';
+    const payload = buildV2Payload({
+      file: { name: filename, buffer, description: 'jplace 戦況マップ' },
+      components: buildMapComponents(filename, '最新タイル合成マップを表示中'),
+    });
+    return new Response(payload.body, {
+      status: 200,
+      headers: {
+        ...payload.headers,
+      },
+    });
+  }
+
+  if (cmdName === 'sector') {
+    const areaOpt = interaction.data?.options?.find((o) => o.name === 'area')?.value || null;
+    const buffer = await createSectorImageBuffer(areaOpt);
+    const filename = areaOpt ? `sector-${areaOpt.toUpperCase()}.png` : 'sector-grid.png';
+    const caption = areaOpt ? `区画 ${areaOpt.toUpperCase()} の拡大マップ` : '区画一覧（A1〜C4）グリッド表示';
+    const components = [
+      containerComp({
+        accentColor: 0x10aea6,
+        components: [
+          textComp(`**jplace 区画マップ**\n${caption}`),
+          mediaGalleryComp(filename, caption),
+          sepComp(),
+          buildSectorSelectRow(areaOpt),
+        ],
+      }),
+    ];
+    const payload = buildV2Payload({
+      file: { name: filename, buffer, description: caption },
+      components,
+    });
+    return new Response(payload.body, { status: 200, headers: payload.headers });
+  }
+
+  const resObj = infoV2('コマンド受信', `\`/${cmdName}\` を受け付けました。`, { ephemeral: true });
+  const payload = buildV2Payload(resObj, { ephemeral: true });
+  return new Response(payload.body, { status: 200, headers: payload.headers });
+}
+
+async function handleMessageComponent(interaction, env) {
+  const customId = interaction.data?.custom_id || '';
+
+  if (customId === 'map_refresh') {
+    const buffer = await createMergedImageBuffer();
+    const filename = 'jplace-map.png';
+    const payload = buildV2Payload({
+      file: { name: filename, buffer, description: 'jplace 戦況マップ' },
+      components: buildMapComponents(filename, '最新タイルに更新しました'),
+    });
+    return new Response(
+      JSON.stringify({
+        type: RESPONSE_UPDATE_MESSAGE,
+        data: {
+          flags: FLAG_IS_COMPONENTS_V2,
+          components: buildMapComponents(filename, '最新タイルに更新しました'),
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  if (customId === 'sector_select') {
+    const selected = interaction.data?.values?.[0] || null;
+    const buffer = await createSectorImageBuffer(selected);
+    const filename = selected ? `sector-${selected}.png` : 'sector-grid.png';
+    const caption = selected ? `区画 ${selected} の拡大マップ` : '区画一覧（A1〜C4）グリッド表示';
+    const components = [
+      containerComp({
+        accentColor: 0x10aea6,
+        components: [
+          textComp(`**jplace 区画マップ**\n${caption}`),
+          mediaGalleryComp(filename, caption),
+          sepComp(),
+          buildSectorSelectRow(selected),
+        ],
+      }),
+    ];
+    const payload = buildV2Payload({
+      file: { name: filename, buffer, description: caption },
+      components,
+    });
+    return new Response(payload.body, { status: 200, headers: payload.headers });
+  }
+
+  const resObj = infoV2('操作を受付', `コンポーネント \`${customId}\` を処理しました。`, { ephemeral: true });
+  const payload = buildV2Payload(resObj, { ephemeral: true });
+  return new Response(payload.body, { status: 200, headers: payload.headers });
+}
+
+// ==========================================
+// Cloudflare Worker Entrypoint
+// ==========================================
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+
+    if (request.method === 'GET') {
+      return new Response('jpace bot worker is running', {
+        status: 200,
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+      });
+    }
+
+    if (request.method !== 'POST') {
+      return new Response('Method Not Allowed', { status: 405 });
+    }
+
+    const rawBody = await request.text();
+    const isValid = await verifyDiscordSignature(request, rawBody, env.DISCORD_PUBLIC_KEY);
+    if (!isValid) {
+      return new Response('Invalid request signature', { status: 401 });
+    }
+
+    let interaction;
+    try {
+      interaction = JSON.parse(rawBody);
+    } catch {
+      return new Response('Invalid JSON', { status: 400 });
+    }
+
+    if (interaction.type === INTERACTION_PING) {
+      return new Response(JSON.stringify({ type: RESPONSE_PONG }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    try {
+      if (interaction.type === INTERACTION_APPLICATION_COMMAND) {
+        return await handleApplicationCommand(interaction, env);
+      }
+      if (interaction.type === INTERACTION_MESSAGE_COMPONENT) {
+        return await handleMessageComponent(interaction, env);
+      }
+
+      const fallback = infoV2('未対応のインタラクション', `type: ${interaction.type}`, { ephemeral: true });
+      const payload = buildV2Payload(fallback, { ephemeral: true });
+      return new Response(payload.body, { status: 200, headers: payload.headers });
+    } catch (err) {
+      const errObj = errorV2(err?.message || '予期しないエラーが発生しました', true);
+      const payload = buildV2Payload(errObj, { ephemeral: true });
+      return new Response(payload.body, { status: 200, headers: payload.headers });
+    }
+  },
+};
