@@ -64,6 +64,7 @@ let wasmInitialized = false;
 async function ensureWasmInit() {
   if (!wasmInitialized) {
     wasmInitialized = true;
+    console.log('[wasm] 初期化フラグをセットしました');
   }
 }
 
@@ -72,16 +73,35 @@ let commandsRegistered = false;
 let commandsRegisterPromise = null;
 
 async function registerSlashCommandsIfNeeded(env) {
-  if (commandsRegistered) return;
-  if (!env?.DISCORD_APPLICATION_ID || !env?.DISCORD_TOKEN) return;
+  if (commandsRegistered) {
+    return;
+  }
+
+  const appId = String(env?.DISCORD_APPLICATION_ID || '').trim();
+  const hasToken = Boolean(String(env?.DISCORD_TOKEN || '').trim());
+  const guildId = String(env?.DISCORD_GUILD_ID || '').trim();
+
+  if (!appId || !hasToken) {
+    console.warn('[cmd-reg] スキップ: 環境変数が不足しています', {
+      hasApplicationId: Boolean(appId),
+      hasDiscordToken: hasToken,
+      scope: guildId ? `guild:${guildId}` : 'global',
+    });
+    return;
+  }
 
   if (!commandsRegisterPromise) {
     commandsRegisterPromise = (async () => {
-      const appId = String(env.DISCORD_APPLICATION_ID).trim();
-      const guildId = String(env.DISCORD_GUILD_ID || '').trim();
+      const scope = guildId ? `guild:${guildId}` : 'global';
       const endpoint = guildId
         ? `https://discord.com/api/v10/applications/${encodeURIComponent(appId)}/guilds/${encodeURIComponent(guildId)}/commands`
         : `https://discord.com/api/v10/applications/${encodeURIComponent(appId)}/commands`;
+
+      console.log('[cmd-reg] コマンド登録を開始します', {
+        scope,
+        commandCount: SLASH_COMMANDS.length,
+        commands: SLASH_COMMANDS.map((c) => c.name),
+      });
 
       try {
         const res = await fetch(endpoint, {
@@ -92,11 +112,28 @@ async function registerSlashCommandsIfNeeded(env) {
           },
           body: JSON.stringify(SLASH_COMMANDS),
         });
+
+        const responseText = await res.text();
         if (res.ok) {
           commandsRegistered = true;
+          console.log('[cmd-reg] コマンド登録に成功しました', {
+            status: res.status,
+            scope,
+            registered: SLASH_COMMANDS.map((c) => c.name),
+          });
+        } else {
+          console.error('[cmd-reg] コマンド登録APIがエラーを返しました', {
+            status: res.status,
+            statusText: res.statusText,
+            scope,
+            body: responseText.slice(0, 500),
+          });
         }
-      } catch {
-        // 通信失敗時は次回アクセス時に再試行できるようフラグを立てない
+      } catch (err) {
+        console.error('[cmd-reg] コマンド登録の通信に失敗しました', {
+          scope,
+          message: err?.message || String(err),
+        });
       } finally {
         commandsRegisterPromise = null;
       }
@@ -229,14 +266,34 @@ function resolveColorEntry(input) {
 // Discord API & Permission / Role Helpers
 // ==========================================
 async function discordApi(env, endpoint, options = {}) {
-  return fetch(`https://discord.com/api/v10${endpoint}`, {
-    ...options,
-    headers: {
-      Authorization: `Bot ${env.DISCORD_TOKEN}`,
-      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
-      ...options.headers,
-    },
-  });
+  const method = options.method || 'GET';
+  const url = `https://discord.com/api/v10${endpoint}`;
+  try {
+    const res = await fetch(url, {
+      ...options,
+      headers: {
+        Authorization: `Bot ${env.DISCORD_TOKEN}`,
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        ...options.headers,
+      },
+    });
+    if (!res.ok) {
+      console.warn('[discord-api] 応答エラー', {
+        method,
+        endpoint,
+        status: res.status,
+        statusText: res.statusText,
+      });
+    }
+    return res;
+  } catch (err) {
+    console.error('[discord-api] Botとの通信に失敗しました', {
+      method,
+      endpoint,
+      message: err?.message || String(err),
+    });
+    throw err;
+  }
 }
 
 function hasAdminPermission(member) {
@@ -689,10 +746,19 @@ function hexToUint8Array(hex) {
 }
 
 async function verifyDiscordSignature(request, rawBodyText, publicKeyHex) {
-  if (!publicKeyHex) return true;
+  if (!publicKeyHex) {
+    console.warn('[sig] DISCORD_PUBLIC_KEY が未設定のため署名検証をスキップします');
+    return true;
+  }
   const signatureHex = request.headers.get('x-signature-ed25519');
   const timestamp = request.headers.get('x-signature-timestamp');
-  if (!signatureHex || !timestamp) return false;
+  if (!signatureHex || !timestamp) {
+    console.warn('[sig] 署名ヘッダーが不足しています', {
+      hasSignature: Boolean(signatureHex),
+      hasTimestamp: Boolean(timestamp),
+    });
+    return false;
+  }
 
   try {
     const key = await crypto.subtle.importKey(
@@ -703,8 +769,15 @@ async function verifyDiscordSignature(request, rawBodyText, publicKeyHex) {
       ['verify']
     );
     const msg = new TextEncoder().encode(timestamp + rawBodyText);
-    return await crypto.subtle.verify('Ed25519', key, hexToUint8Array(signatureHex), msg);
-  } catch {
+    const ok = await crypto.subtle.verify('Ed25519', key, hexToUint8Array(signatureHex), msg);
+    if (!ok) {
+      console.warn('[sig] 署名検証に失敗しました');
+    }
+    return ok;
+  } catch (err) {
+    console.error('[sig] 署名検証中にエラーが発生しました', {
+      message: err?.message || String(err),
+    });
     return false;
   }
 }
@@ -714,6 +787,11 @@ async function verifyDiscordSignature(request, rawBodyText, publicKeyHex) {
 // ==========================================
 async function handleApplicationCommand(interaction, env) {
   const cmdName = interaction.data?.name || '';
+  console.log('[interaction] スラッシュコマンドを受信', {
+    cmdName,
+    guildId: interaction.guild_id || null,
+    userId: interaction.member?.user?.id || interaction.user?.id || null,
+  });
 
   if (cmdName === 'map') {
     const buffer = await createMergedImageBuffer();
@@ -753,6 +831,7 @@ async function handleApplicationCommand(interaction, env) {
     return new Response(payload.body, { status: 200, headers: payload.headers });
   }
 
+  console.warn('[interaction] 未対応のスラッシュコマンド', { cmdName });
   const resObj = infoV2('コマンド受信', `\`/${cmdName}\` を受け付けました。`, { ephemeral: true });
   const payload = buildV2Payload(resObj, { ephemeral: true });
   return new Response(payload.body, { status: 200, headers: payload.headers });
@@ -760,6 +839,11 @@ async function handleApplicationCommand(interaction, env) {
 
 async function handleMessageComponent(interaction, env) {
   const customId = interaction.data?.custom_id || '';
+  console.log('[interaction] コンポーネント操作を受信', {
+    customId,
+    values: interaction.data?.values || null,
+    userId: interaction.member?.user?.id || interaction.user?.id || null,
+  });
 
   if (customId === 'map_refresh') {
     const buffer = await createMergedImageBuffer();
@@ -799,6 +883,7 @@ async function handleMessageComponent(interaction, env) {
     return new Response(payload.body, { status: 200, headers: payload.headers });
   }
 
+  console.warn('[interaction] 未対応のコンポーネント操作', { customId });
   const resObj = infoV2('操作を受付', `コンポーネント \`${customId}\` を処理しました。`, { ephemeral: true });
   const payload = buildV2Payload(resObj, { ephemeral: true });
   return new Response(payload.body, { status: 200, headers: payload.headers });
@@ -809,6 +894,12 @@ async function handleMessageComponent(interaction, env) {
 // ==========================================
 export default {
   async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    console.log('[worker] リクエスト受信', {
+      method: request.method,
+      path: url.pathname,
+    });
+
     if (ctx?.waitUntil) {
       ctx.waitUntil(registerSlashCommandsIfNeeded(env));
     } else {
@@ -829,17 +920,22 @@ export default {
     const rawBody = await request.text();
     const isValid = await verifyDiscordSignature(request, rawBody, env.DISCORD_PUBLIC_KEY);
     if (!isValid) {
+      console.error('[worker] 署名検証に失敗したため 401 を返します');
       return new Response('Invalid request signature', { status: 401 });
     }
 
     let interaction;
     try {
       interaction = JSON.parse(rawBody);
-    } catch {
+    } catch (err) {
+      console.error('[worker] リクエストJSONのパースに失敗しました', {
+        message: err?.message || String(err),
+      });
       return new Response('Invalid JSON', { status: 400 });
     }
 
     if (interaction.type === INTERACTION_PING) {
+      console.log('[worker] Discord PING を受信 -> PONG を返します');
       return new Response(JSON.stringify({ type: RESPONSE_PONG }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -854,10 +950,15 @@ export default {
         return await handleMessageComponent(interaction, env);
       }
 
+      console.warn('[worker] 未対応のインタラクション種別', { type: interaction.type });
       const fallback = infoV2('未対応のインタラクション', `type: ${interaction.type}`, { ephemeral: true });
       const payload = buildV2Payload(fallback, { ephemeral: true });
       return new Response(payload.body, { status: 200, headers: payload.headers });
     } catch (err) {
+      console.error('[worker] インタラクション処理中に例外が発生しました', {
+        message: err?.message || String(err),
+        stack: err?.stack || null,
+      });
       const errObj = errorV2(err?.message || '予期しないエラーが発生しました', true);
       const payload = buildV2Payload(errObj, { ephemeral: true });
       return new Response(payload.body, { status: 200, headers: payload.headers });
