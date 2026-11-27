@@ -1,4 +1,5 @@
-import init, { PhotonImage } from 'photon-wasm';
+```javascript
+import { PhotonImage } from 'photon-wasm';
 
 const CHANNEL_ID = '1507371465744580739';
 
@@ -34,7 +35,6 @@ const PERM_ADMINISTRATOR = 1n << 3n;
 let wasmInitialized = false;
 async function ensureWasmInit() {
   if (!wasmInitialized) {
-    await init();
     wasmInitialized = true;
   }
 }
@@ -1407,8 +1407,8 @@ async function handleComponentInteraction(interaction, env) {
     try {
       if (!guildId || !user) {
         const errPayload = buildV2Payload(errorV2('サーバー内でのみ利用できます。', true), { ephemeral: true });
-        await discordApi(env, `/webhooks/${env.APPLICATION_ID}/${interaction.token}/messages/@original`, {
-          method: 'PATCH',
+        await discordApi(env, `/webhooks/${env.APPLICATION_ID}/${interaction.token}`, {
+          method: 'POST',
           body: errPayload.body,
           headers: errPayload.headers,
         });
@@ -1424,8 +1424,8 @@ async function handleComponentInteraction(interaction, env) {
           errorV2('あなたの所属するwplaceカラーロールが見つかりません。', true),
           { ephemeral: true }
         );
-        await discordApi(env, `/webhooks/${env.APPLICATION_ID}/${interaction.token}/messages/@original`, {
-          method: 'PATCH',
+        await discordApi(env, `/webhooks/${env.APPLICATION_ID}/${interaction.token}`, {
+          method: 'POST',
           body: errPayload.body,
           headers: errPayload.headers,
         });
@@ -1461,8 +1461,8 @@ async function handleComponentInteraction(interaction, env) {
         { ephemeral: true }
       );
 
-      await discordApi(env, `/webhooks/${env.APPLICATION_ID}/${interaction.token}/messages/@original`, {
-        method: 'PATCH',
+      await discordApi(env, `/webhooks/${env.APPLICATION_ID}/${interaction.token}`, {
+        method: 'POST',
         body: followupPayload.body,
         headers: followupPayload.headers,
       });
@@ -1470,8 +1470,8 @@ async function handleComponentInteraction(interaction, env) {
       const errPayload = buildV2Payload(errorV2(`自国ハイライト生成に失敗しました: ${err.message}`, true), {
         ephemeral: true,
       });
-      await discordApi(env, `/webhooks/${env.APPLICATION_ID}/${interaction.token}/messages/@original`, {
-        method: 'PATCH',
+      await discordApi(env, `/webhooks/${env.APPLICATION_ID}/${interaction.token}`, {
+        method: 'POST',
         body: errPayload.body,
         headers: errPayload.headers,
       });
@@ -1604,7 +1604,7 @@ async function handleComponentInteraction(interaction, env) {
     const memberRoleIds = new Set(member?.roles || []);
 
     if ((op === 'act_accept' || op === 'act_reject') && !memberRoleIds.has(toRoleId)) {
-      await discordApi(env, `/webhooks/${env.APPLICATION_ID}/${interaction.token}/messages/@original`, {
+      await discordApi(env, `/webhooks/${env.APPLICATION_ID}/${interaction.token}`, {
         method: 'POST',
         ...buildV2Payload(errorV2('この操作は対象国ロールを所持するメンバーのみ実行できます。', true), {
           ephemeral: true,
@@ -1614,7 +1614,7 @@ async function handleComponentInteraction(interaction, env) {
     }
 
     if (op === 'act_cancel' && !memberRoleIds.has(fromRoleId)) {
-      await discordApi(env, `/webhooks/${env.APPLICATION_ID}/${interaction.token}/messages/@original`, {
+      await discordApi(env, `/webhooks/${env.APPLICATION_ID}/${interaction.token}`, {
         method: 'POST',
         ...buildV2Payload(errorV2('この操作は宣言国ロールを所持するメンバーのみ実行できます。', true), {
           ephemeral: true,
@@ -1672,7 +1672,7 @@ async function handleComponentInteraction(interaction, env) {
     const isAdmin = hasAdminPermission(member);
 
     if (userColorRoles.length === 0 && !isAdmin) {
-      await discordApi(env, `/webhooks/${env.APPLICATION_ID}/${interaction.token}/messages/@original`, {
+      await discordApi(env, `/webhooks/${env.APPLICATION_ID}/${interaction.token}`, {
         method: 'POST',
         ...buildV2Payload(
           errorV2('公認または取消を行うにはwplaceカラーロール（または管理者権限）が必要です。', true),
@@ -1683,7 +1683,7 @@ async function handleComponentInteraction(interaction, env) {
     }
 
     if (memberRoleIds.has(fromRoleId) && !isAdmin) {
-      await discordApi(env, `/webhooks/${env.APPLICATION_ID}/${interaction.token}/messages/@original`, {
+      await discordApi(env, `/webhooks/${env.APPLICATION_ID}/${interaction.token}`, {
         method: 'POST',
         ...buildV2Payload(errorV2('自国による自己公認・自己取消はできません。', true), { ephemeral: true }),
       });
@@ -1947,3 +1947,4 @@ export default {
     );
   },
 };
+```
