@@ -39,12 +39,71 @@ const SECTOR_ROWS = ['1', '2', '3', '4'];
 // Discord Permission Bits
 const PERM_ADMINISTRATOR = 1n << 3n;
 
+// 登録するスラッシュコマンド定義
+const SLASH_COMMANDS = [
+  {
+    name: 'map',
+    description: 'jplace 戦況マップを表示します',
+  },
+  {
+    name: 'sector',
+    description: 'jplace 区画マップ（A1〜C4）を表示します',
+    options: [
+      {
+        name: 'area',
+        description: '拡大したい区画（例: A1, B2, C4）',
+        type: 3, // STRING
+        required: false,
+      },
+    ],
+  },
+];
+
 // Wasm initialization guard
 let wasmInitialized = false;
 async function ensureWasmInit() {
   if (!wasmInitialized) {
     wasmInitialized = true;
   }
+}
+
+// スラッシュコマンド自動登録ガード（同一Workerインスタンス内で重複実行を防止）
+let commandsRegistered = false;
+let commandsRegisterPromise = null;
+
+async function registerSlashCommandsIfNeeded(env) {
+  if (commandsRegistered) return;
+  if (!env?.DISCORD_APPLICATION_ID || !env?.DISCORD_TOKEN) return;
+
+  if (!commandsRegisterPromise) {
+    commandsRegisterPromise = (async () => {
+      const appId = String(env.DISCORD_APPLICATION_ID).trim();
+      const guildId = String(env.DISCORD_GUILD_ID || '').trim();
+      const endpoint = guildId
+        ? `https://discord.com/api/v10/applications/${encodeURIComponent(appId)}/guilds/${encodeURIComponent(guildId)}/commands`
+        : `https://discord.com/api/v10/applications/${encodeURIComponent(appId)}/commands`;
+
+      try {
+        const res = await fetch(endpoint, {
+          method: 'PUT',
+          headers: {
+            Authorization: `Bot ${env.DISCORD_TOKEN}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(SLASH_COMMANDS),
+        });
+        if (res.ok) {
+          commandsRegistered = true;
+        }
+      } catch {
+        // 通信失敗時は次回アクセス時に再試行できるようフラグを立てない
+      } finally {
+        commandsRegisterPromise = null;
+      }
+    })();
+  }
+
+  await commandsRegisterPromise;
 }
 
 // ==========================================
@@ -630,7 +689,7 @@ function hexToUint8Array(hex) {
 }
 
 async function verifyDiscordSignature(request, rawBodyText, publicKeyHex) {
-  if (!publicKeyHex) return true; // 未設定時はローカル検証用に通過
+  if (!publicKeyHex) return true;
   const signatureHex = request.headers.get('x-signature-ed25519');
   const timestamp = request.headers.get('x-signature-timestamp');
   if (!signatureHex || !timestamp) return false;
@@ -705,10 +764,6 @@ async function handleMessageComponent(interaction, env) {
   if (customId === 'map_refresh') {
     const buffer = await createMergedImageBuffer();
     const filename = 'jplace-map.png';
-    const payload = buildV2Payload({
-      file: { name: filename, buffer, description: 'jplace 戦況マップ' },
-      components: buildMapComponents(filename, '最新タイルに更新しました'),
-    });
     return new Response(
       JSON.stringify({
         type: RESPONSE_UPDATE_MESSAGE,
@@ -754,7 +809,11 @@ async function handleMessageComponent(interaction, env) {
 // ==========================================
 export default {
   async fetch(request, env, ctx) {
-    const url = new URL(request.url);
+    if (ctx?.waitUntil) {
+      ctx.waitUntil(registerSlashCommandsIfNeeded(env));
+    } else {
+      await registerSlashCommandsIfNeeded(env);
+    }
 
     if (request.method === 'GET') {
       return new Response('jpace bot worker is running', {
