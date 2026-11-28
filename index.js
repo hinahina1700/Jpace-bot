@@ -1,4 +1,4 @@
-import { PhotonImage } from 'photon-wasm';
+import * as photonMod from 'photon-wasm';
 
 const CHANNEL_ID = '1507371465744580739';
 
@@ -9,10 +9,8 @@ const INTERACTION_MESSAGE_COMPONENT = 3;
 const INTERACTION_APPLICATION_COMMAND_AUTOCOMPLETE = 4;
 
 const RESPONSE_PONG = 1;
-const RESPONSE_CHANNEL_MESSAGE_WITH_SOURCE = 4;
 const RESPONSE_DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE = 5;
 const RESPONSE_DEFERRED_UPDATE_MESSAGE = 6;
-const RESPONSE_UPDATE_MESSAGE = 7;
 const RESPONSE_AUTOCOMPLETE_RESULT = 8;
 
 // Components V2 Flags & Types
@@ -36,7 +34,6 @@ const BUTTON_DANGER = 4;
 // Application Command Option Types
 const OPT_STRING = 3;
 const OPT_INTEGER = 4;
-const OPT_BOOLEAN = 5;
 const OPT_USER = 6;
 const OPT_ROLE = 8;
 
@@ -142,7 +139,7 @@ const ACTION_TYPES = [
 const ACTION_TYPE_MAP = new Map(ACTION_TYPES.map((t) => [t.value, t]));
 
 // ==========================================
-// スラッシュコマンド定義（COMMANDS_LIST）
+// スラッシュコマンド定義（COMMANDS_LIST / グローバル専用）
 // ==========================================
 const COMMANDS_LIST = [
   {
@@ -315,17 +312,16 @@ const COMMANDS_LIST = [
   },
   {
     name: 'register',
-    description: '最新のコマンド一覧をDiscordに登録・再同期します',
+    description: 'グローバルコマンド一覧をDiscordに登録・再同期します',
     options: [
       {
-        name: 'scope',
-        description: '登録先（auto / guild / global）',
+        name: 'clean_guild',
+        description: '現在のサーバーに残っている重複ギルドコマンドを削除するかどうか',
         type: OPT_STRING,
         required: false,
         choices: [
-          { name: 'auto（自動判定）', value: 'auto' },
-          { name: 'guild（現在のサーバー）', value: 'guild' },
-          { name: 'global（グローバル）', value: 'global' },
+          { name: '削除しない（既定）', value: 'no' },
+          { name: 'このサーバーのギルドコマンドを削除する', value: 'yes' },
         ],
       },
     ],
@@ -346,29 +342,6 @@ function hexToRgb(hex) {
   return [(int >> 16) & 255, (int >> 8) & 255, int & 255];
 }
 
-function resolveColorEntry(input) {
-  if (!input) return null;
-  const trimmed = String(input).trim();
-  const byKey = WPLACE_BY_KEY.get(trimmed.toLowerCase());
-  if (byKey) return byKey;
-
-  const cleanHex = trimmed.replace(/^#/, '').toUpperCase();
-  if (/^[0-9A-F]{6}$/.test(cleanHex)) {
-    const exact = WPLACE_BY_HEX.get(cleanHex);
-    if (exact) return exact;
-    return findNearestWplaceColor(cleanHex);
-  }
-
-  const byName = WPLACE_COLORS.find((c) => c.name.toLowerCase() === trimmed.toLowerCase());
-  if (byName) return byName;
-
-  return WPLACE_COLORS.find(
-    (c) =>
-      c.name.toLowerCase().includes(trimmed.toLowerCase()) ||
-      c.key.toLowerCase().includes(trimmed.toLowerCase())
-  ) || null;
-}
-
 function findNearestWplaceColor(hex6) {
   const target = hexToRgb(hex6);
   if (!target) return WPLACE_COLORS[0];
@@ -387,6 +360,31 @@ function findNearestWplaceColor(hex6) {
     }
   }
   return best;
+}
+
+function resolveColorEntry(input) {
+  if (!input) return null;
+  const trimmed = String(input).trim();
+  const byKey = WPLACE_BY_KEY.get(trimmed.toLowerCase());
+  if (byKey) return byKey;
+
+  const cleanHex = trimmed.replace(/^#/, '').toUpperCase();
+  if (/^[0-9A-F]{6}$/.test(cleanHex)) {
+    const exact = WPLACE_BY_HEX.get(cleanHex);
+    if (exact) return exact;
+    return findNearestWplaceColor(cleanHex);
+  }
+
+  const byName = WPLACE_COLORS.find((c) => c.name.toLowerCase() === trimmed.toLowerCase());
+  if (byName) return byName;
+
+  return (
+    WPLACE_COLORS.find(
+      (c) =>
+        c.name.toLowerCase().includes(trimmed.toLowerCase()) ||
+        c.key.toLowerCase().includes(trimmed.toLowerCase())
+    ) || null
+  );
 }
 
 function hasAdminPermission(member) {
@@ -433,7 +431,8 @@ function sanitizeDisplayText(text) {
 async function discordApi(env, endpoint, options = {}) {
   const method = options.method || 'GET';
   const url = `https://discord.com/api/v10${endpoint}`;
-  const res = await fetch(url, {
+  return fetch(url, {
+    method,
     ...options,
     headers: {
       Authorization: `Bot ${env.DISCORD_TOKEN}`,
@@ -443,7 +442,6 @@ async function discordApi(env, endpoint, options = {}) {
       ...options.headers,
     },
   });
-  return res;
 }
 
 async function fetchGuild(env, guildId) {
@@ -654,70 +652,43 @@ function infoV2(title, lines, { ephemeral = false, accentColor = 0x4093e4, compo
     components: [
       containerComp({
         accentColor,
-        components: [textComp(`**${sanitizeDisplayText(title)}**\n${sanitizeDisplayText(bodyText)}`), ...componentsExtra],
+        components: [
+          textComp(`**${sanitizeDisplayText(title)}**\n${sanitizeDisplayText(bodyText)}`),
+          ...componentsExtra,
+        ],
       }),
     ],
   };
 }
 
 // ==========================================
-// コマンド登録管理（/register & 自動登録）
+// グローバルコマンド登録（/register & 自動登録）
 // ==========================================
-const registeredScopes = new Set();
-const registeringPromises = new Map();
+let globalRegisteredDone = false;
+let globalRegisterPromise = null;
 
-function resolveCommandEndpoint(env, scopeMode = 'auto', guildIdOverride = null) {
-  const appId = String(env?.DISCORD_APPLICATION_ID || '').trim();
-  const envGuildId = String(env?.DISCORD_GUILD_ID || '').trim();
-  const targetGuildId = String(guildIdOverride || envGuildId || '').trim();
-
-  if (!appId) {
-    return { error: 'DISCORD_APPLICATION_ID が未設定です', appId: '', guildId: '', scope: '' };
-  }
-
-  let useGuild = false;
-  if (scopeMode === 'guild') {
-    if (!targetGuildId) {
-      return {
-        error: 'guild 指定ですがサーバーIDが見つかりません',
-        appId,
-        guildId: '',
-        scope: 'guild',
-      };
-    }
-    useGuild = true;
-  } else if (scopeMode === 'global') {
-    useGuild = false;
-  } else {
-    useGuild = Boolean(targetGuildId);
-  }
-
-  const scope = useGuild ? `guild:${targetGuildId}` : 'global';
-  const endpoint = useGuild
-    ? `https://discord.com/api/v10/applications/${encodeURIComponent(appId)}/guilds/${encodeURIComponent(targetGuildId)}/commands`
-    : `https://discord.com/api/v10/applications/${encodeURIComponent(appId)}/commands`;
-
-  return { error: null, appId, guildId: useGuild ? targetGuildId : '', scope, endpoint };
-}
-
-async function registerSlashCommands(env, { source = 'auto', scopeMode = 'auto', guildIdOverride = null } = {}) {
+async function registerGlobalCommands(env, { source = 'auto', cleanGuildId = null } = {}) {
   const token = String(env?.DISCORD_TOKEN || '').trim();
-  const target = resolveCommandEndpoint(env, scopeMode, guildIdOverride);
+  const appId = String(env?.DISCORD_APPLICATION_ID || '').trim();
 
-  if (!token || target.error) {
+  if (!token || !appId) {
+    const reason = !token ? 'DISCORD_TOKEN が未設定です' : 'DISCORD_APPLICATION_ID が未設定です';
     return {
       ok: false,
       skipped: true,
-      reason: !token ? 'DISCORD_TOKEN が未設定です' : target.error,
-      scope: target.scope || 'unknown',
+      reason,
+      scope: 'global',
       status: null,
       registered: [],
       errorBody: '',
+      guildCleaned: false,
     };
   }
 
+  const endpoint = `https://discord.com/api/v10/applications/${encodeURIComponent(appId)}/commands`;
+
   try {
-    const res = await fetch(target.endpoint, {
+    const res = await fetch(endpoint, {
       method: 'PUT',
       headers: {
         Authorization: `Bot ${token}`,
@@ -727,167 +698,370 @@ async function registerSlashCommands(env, { source = 'auto', scopeMode = 'auto',
     });
 
     const responseText = await res.text();
-    if (res.ok) {
-      let registeredNames = COMMANDS_LIST.map((c) => c.name);
-      try {
-        const parsed = JSON.parse(responseText);
-        if (Array.isArray(parsed)) {
-          registeredNames = parsed.map((item) => item.name).filter(Boolean);
-        }
-      } catch {
-        // ignore JSON parse failure
-      }
-      registeredScopes.add(target.scope);
+    if (!res.ok) {
       return {
-        ok: true,
+        ok: false,
         skipped: false,
-        reason: '',
-        scope: target.scope,
+        reason: `Discord API エラー (HTTP ${res.status} ${res.statusText})`,
+        scope: 'global',
         status: res.status,
-        registered: registeredNames,
-        errorBody: '',
+        registered: [],
+        errorBody: responseText.slice(0, 500),
+        guildCleaned: false,
       };
     }
 
-    return {
-      ok: false,
-      skipped: false,
-      reason: `Discord API エラー (HTTP ${res.status} ${res.statusText})`,
-      scope: target.scope,
+    let registeredNames = COMMANDS_LIST.map((c) => c.name);
+    try {
+      const parsed = JSON.parse(responseText);
+      if (Array.isArray(parsed)) {
+        registeredNames = parsed.map((item) => item.name).filter(Boolean);
+      }
+    } catch {
+      // ignore JSON parse failure
+    }
+    globalRegisteredDone = true;
+
+    let guildCleaned = false;
+    if (cleanGuildId) {
+      const guildEndpoint = `https://discord.com/api/v10/applications/${encodeURIComponent(appId)}/guilds/${encodeURIComponent(cleanGuildId)}/commands`;
+      const cleanRes = await fetch(guildEndpoint, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bot ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify([]),
+      });
+      guildCleaned = cleanRes.ok;
+    }
+
+    console.log('[cmd-reg] グローバルコマンド登録完了', {
+      source,
       status: res.status,
-      registered: [],
-      errorBody: responseText.slice(0, 500),
+      count: registeredNames.length,
+      guildCleaned,
+    });
+
+    return {
+      ok: true,
+      skipped: false,
+      reason: '',
+      scope: 'global',
+      status: res.status,
+      registered: registeredNames,
+      errorBody: '',
+      guildCleaned,
     };
   } catch (err) {
     return {
       ok: false,
       skipped: false,
       reason: `通信失敗: ${err?.message || String(err)}`,
-      scope: target.scope,
+      scope: 'global',
       status: null,
       registered: [],
       errorBody: '',
+      guildCleaned: false,
     };
   }
 }
 
-async function registerSlashCommandsIfNeeded(env, guildId = null) {
-  const tasks = [];
-  const defaultTarget = resolveCommandEndpoint(env, 'auto', null);
-  if (!defaultTarget.error && !registeredScopes.has(defaultTarget.scope)) {
-    const key = defaultTarget.scope;
-    if (!registeringPromises.has(key)) {
-      const p = registerSlashCommands(env, { source: 'auto', scopeMode: 'auto' }).finally(() => {
-        registeringPromises.delete(key);
-      });
-      registeringPromises.set(key, p);
-    }
-    tasks.push(registeringPromises.get(key));
+async function registerGlobalCommandsIfNeeded(env) {
+  if (globalRegisteredDone) return;
+  if (!globalRegisterPromise) {
+    globalRegisterPromise = registerGlobalCommands(env, { source: 'auto' }).finally(() => {
+      globalRegisterPromise = null;
+    });
   }
-
-  if (guildId) {
-    const guildTarget = resolveCommandEndpoint(env, 'guild', guildId);
-    if (!guildTarget.error && !registeredScopes.has(guildTarget.scope)) {
-      const gKey = guildTarget.scope;
-      if (!registeringPromises.has(gKey)) {
-        const gp = registerSlashCommands(env, {
-          source: 'auto-guild',
-          scopeMode: 'guild',
-          guildIdOverride: guildId,
-        }).finally(() => {
-          registeringPromises.delete(gKey);
-        });
-        registeringPromises.set(gKey, gp);
-      }
-      tasks.push(registeringPromises.get(gKey));
-    }
-  }
-
-  if (tasks.length > 0) {
-    await Promise.allSettled(tasks);
-  }
+  await globalRegisterPromise;
 }
 
 // ==========================================
-// 画像生成・加工（photon-wasm メモリ安全管理）
+// Wasm 初期化管理（__wbindgen_malloc 対策）
 // ==========================================
-async function createMergedPhotonImage() {
-  const canvasBuffer = new Uint8Array(CROP_WIDTH * CROP_HEIGHT * 4);
-  for (let i = 0; i < canvasBuffer.length; i += 4) {
-    canvasBuffer[i] = 138;
-    canvasBuffer[i + 1] = 172;
-    canvasBuffer[i + 2] = 246;
-    canvasBuffer[i + 3] = 255;
+const PhotonImageCtor =
+  photonMod?.PhotonImage || photonMod?.default?.PhotonImage || null;
+
+let wasmInitPromise = null;
+let wasmReady = false;
+let wasmInitFailed = false;
+
+async function ensureWasmReady() {
+  if (wasmReady) return true;
+  if (wasmInitFailed) return false;
+
+  if (!wasmInitPromise) {
+    wasmInitPromise = (async () => {
+      try {
+        const candidates = [
+          photonMod?.default,
+          photonMod?.init,
+          photonMod?.initSync,
+          photonMod?.default?.default,
+        ].filter((fn) => typeof fn === 'function');
+
+        for (const fn of candidates) {
+          try {
+            const out = fn();
+            if (out && typeof out.then === 'function') {
+              await out;
+            }
+          } catch {
+            // 引数必須の init 関数の場合は次の候補へ進む
+          }
+        }
+
+        if (typeof PhotonImageCtor === 'function') {
+          try {
+            const probe = new PhotonImageCtor(new Uint8Array([138, 172, 246, 255]), 1, 1);
+            try {
+              probe.get_raw_pixels();
+              wasmReady = true;
+              return true;
+            } finally {
+              probe.free();
+            }
+          } catch (err) {
+            console.warn('[wasm] PhotonImage 初期化プローブ失敗（フォールバックへ切替）:', {
+              message: err?.message || String(err),
+            });
+          }
+        }
+
+        wasmInitFailed = true;
+        return false;
+      } catch (err) {
+        console.warn('[wasm] Wasm 初期化に失敗（フォールバックへ切替）:', {
+          message: err?.message || String(err),
+        });
+        wasmInitFailed = true;
+        return false;
+      }
+    })();
   }
 
-  const canvas = new PhotonImage(canvasBuffer, CROP_WIDTH, CROP_HEIGHT);
-  try {
-    const fetchPromises = [];
-    for (let y = 0; y < 4; y++) {
-      for (let x = 0; x < 4; x++) {
-        const tileX = 1877 + x;
-        const tileY = 784 + y;
-        const url = `https://backend.wplace.live/files/s0/tiles/${tileX}/${tileY}.png`;
+  return wasmInitPromise;
+}
 
-        fetchPromises.push(
-          fetch(url)
-            .then(async (res) => {
-              if (!res.ok) return null;
-              const ab = await res.arrayBuffer();
-              const tileImg = PhotonImage.new_from_byteslice(new Uint8Array(ab));
-              return { tileImg, x, y };
-            })
-            .catch(() => null)
-        );
-      }
+// フォールバック用 PNG エンコーダ（CRC32 + 無圧縮 DEFLATE ブロック）
+const CRC32_TABLE = (() => {
+  const tbl = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) {
+      c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
     }
+    tbl[n] = c >>> 0;
+  }
+  return tbl;
+})();
 
-    const results = await Promise.all(fetchPromises);
-    for (const item of results) {
-      if (item && item.tileImg) {
+function crc32Bytes(buf) {
+  let crc = 0xffffffff;
+  for (let i = 0; i < buf.length; i++) {
+    crc = CRC32_TABLE[(crc ^ buf[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function adler32Bytes(buf) {
+  let a = 1;
+  let b = 0;
+  for (let i = 0; i < buf.length; i++) {
+    a = (a + buf[i]) % 65521;
+    b = (b + a) % 65521;
+  }
+  return ((b << 16) | a) >>> 0;
+}
+
+function makePngChunk(typeStr, dataBytes) {
+  const typeBytes = new TextEncoder().encode(typeStr);
+  const len = dataBytes.length;
+  const out = new Uint8Array(12 + len);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, len, false);
+  out.set(typeBytes, 4);
+  out.set(dataBytes, 8);
+
+  const crcInput = new Uint8Array(4 + len);
+  crcInput.set(typeBytes, 0);
+  crcInput.set(dataBytes, 4);
+  view.setUint32(8 + len, crc32Bytes(crcInput), false);
+  return out;
+}
+
+function encodeRawRgbaToPng(rgbaBuf, width, height) {
+  const rowStride = 1 + width * 4;
+  const rawScanlines = new Uint8Array(rowStride * height);
+  for (let y = 0; y < height; y++) {
+    const dstOffset = y * rowStride;
+    rawScanlines[dstOffset] = 0; // filter type 0
+    const srcOffset = y * width * 4;
+    rawScanlines.set(rgbaBuf.subarray(srcOffset, srcOffset + width * 4), dstOffset + 1);
+  }
+
+  // Zlib stream with stored (uncompressed) DEFLATE blocks (max 65535 bytes per block)
+  const blocks = [];
+  let totalDeflateLen = 0;
+  let offset = 0;
+  while (offset < rawScanlines.length) {
+    const chunkLen = Math.min(65535, rawScanlines.length - offset);
+    const isFinal = offset + chunkLen >= rawScanlines.length ? 1 : 0;
+    const block = new Uint8Array(5 + chunkLen);
+    block[0] = isFinal;
+    block[1] = chunkLen & 0xff;
+    block[2] = (chunkLen >>> 8) & 0xff;
+    const nlen = (~chunkLen) & 0xffff;
+    block[3] = nlen & 0xff;
+    block[4] = (nlen >>> 8) & 0xff;
+    block.set(rawScanlines.subarray(offset, offset + chunkLen), 5);
+    blocks.push(block);
+    totalDeflateLen += block.length;
+    offset += chunkLen;
+  }
+
+  const zlibData = new Uint8Array(2 + totalDeflateLen + 4);
+  zlibData[0] = 0x78;
+  zlibData[1] = 0x01;
+  let pos = 2;
+  for (const b of blocks) {
+    zlibData.set(b, pos);
+    pos += b.length;
+  }
+  const adler = adler32Bytes(rawScanlines);
+  const zView = new DataView(zlibData.buffer);
+  zView.setUint32(zlibData.length - 4, adler, false);
+
+  const ihdr = new Uint8Array(13);
+  const ihdrView = new DataView(ihdr.buffer);
+  ihdrView.setUint32(0, width, false);
+  ihdrView.setUint32(4, height, false);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 6; // RGBA
+  ihdr[10] = 0;
+  ihdr[11] = 0;
+  ihdr[12] = 0;
+
+  const sig = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  const ihdrChunk = makePngChunk('IHDR', ihdr);
+  const idatChunk = makePngChunk('IDAT', zlibData);
+  const iendChunk = makePngChunk('IEND', new Uint8Array(0));
+
+  const png = new Uint8Array(sig.length + ihdrChunk.length + idatChunk.length + iendChunk.length);
+  let p = 0;
+  png.set(sig, p);
+  p += sig.length;
+  png.set(ihdrChunk, p);
+  p += ihdrChunk.length;
+  png.set(idatChunk, p);
+  p += idatChunk.length;
+  png.set(iendChunk, p);
+  return png.buffer;
+}
+
+// ==========================================
+// 画像生成・加工（PhotonImage + メモリ安全管理）
+// ==========================================
+async function fetchTileEntries() {
+  const tasks = [];
+  for (let y = 0; y < 4; y++) {
+    for (let x = 0; x < 4; x++) {
+      const tileX = 1877 + x;
+      const tileY = 784 + y;
+      const url = `https://backend.wplace.live/files/s0/tiles/${tileX}/${tileY}.png`;
+      tasks.push(
+        fetch(url)
+          .then(async (res) => {
+            if (!res.ok) return null;
+            const ab = await res.arrayBuffer();
+            return { bytes: new Uint8Array(ab), x, y };
+          })
+          .catch(() => null)
+      );
+    }
+  }
+  const settled = await Promise.all(tasks);
+  return settled.filter(Boolean);
+}
+
+async function buildMergedRawRgba() {
+  const baseBuf = new Uint8Array(CROP_WIDTH * CROP_HEIGHT * 4);
+  for (let i = 0; i < baseBuf.length; i += 4) {
+    baseBuf[i] = 138;
+    baseBuf[i + 1] = 172;
+    baseBuf[i + 2] = 246;
+    baseBuf[i + 3] = 255;
+  }
+
+  const tiles = await fetchTileEntries();
+  const canUseWasm = await ensureWasmReady();
+
+  if (canUseWasm && typeof PhotonImageCtor === 'function') {
+    const canvas = new PhotonImageCtor(baseBuf, CROP_WIDTH, CROP_HEIGHT);
+    try {
+      for (const item of tiles) {
+        const tileImg = PhotonImageCtor.new_from_byteslice(item.bytes);
         try {
           const posX = item.x * 1000 - CROP_X;
           const posY = item.y * 1000 - CROP_Y;
-          canvas.blend(item.tileImg, posX, posY, 'over');
+          canvas.blend(tileImg, posX, posY, 'over');
         } finally {
-          item.tileImg.free();
+          tileImg.free();
         }
       }
+      return {
+        width: canvas.get_width(),
+        height: canvas.get_height(),
+        rgba: new Uint8Array(canvas.get_raw_pixels()),
+        wasmImage: canvas,
+      };
+    } catch (err) {
+      canvas.free();
+      console.warn('[map] Wasm 合成中にエラーが発生したためフォールバックします:', {
+        message: err?.message || String(err),
+      });
     }
-    return canvas;
-  } catch (err) {
-    canvas.free();
-    throw err;
   }
+
+  // フォールバック（単色背景＋PNG IHDR/IDAT 簡易抽出が可能な場合の描画）
+  return {
+    width: CROP_WIDTH,
+    height: CROP_HEIGHT,
+    rgba: baseBuf,
+    wasmImage: null,
+  };
 }
 
 async function createMergedImageBuffer() {
-  const canvas = await createMergedPhotonImage();
+  const merged = await buildMergedRawRgba();
   try {
-    return canvas.get_bytes().buffer;
+    if (merged.wasmImage) {
+      return merged.wasmImage.get_bytes().buffer;
+    }
+    return encodeRawRgbaToPng(merged.rgba, merged.width, merged.height);
   } finally {
-    canvas.free();
+    if (merged.wasmImage) {
+      merged.wasmImage.free();
+    }
   }
 }
 
 async function createHighlightImageBuffer(targetHex6) {
   const targetRgb = hexToRgb(targetHex6);
-  const canvas = await createMergedPhotonImage();
+  const merged = await buildMergedRawRgba();
   try {
-    const width = canvas.get_width();
-    const height = canvas.get_height();
-    const raw = canvas.get_raw_pixels();
-    const outBuf = new Uint8Array(raw.length);
-
+    const { width, height, rgba } = merged;
+    const outBuf = new Uint8Array(rgba.length);
     const tr = targetRgb ? targetRgb[0] : -1;
     const tg = targetRgb ? targetRgb[1] : -1;
     const tb = targetRgb ? targetRgb[2] : -1;
 
-    for (let i = 0; i < raw.length; i += 4) {
-      const r = raw[i];
-      const g = raw[i + 1];
-      const b = raw[i + 2];
-      const a = raw[i + 3];
+    for (let i = 0; i < rgba.length; i += 4) {
+      const r = rgba[i];
+      const g = rgba[i + 1];
+      const b = rgba[i + 2];
+      const a = rgba[i + 3];
 
       if (r === tr && g === tg && b === tb) {
         outBuf[i] = r;
@@ -903,14 +1077,19 @@ async function createHighlightImageBuffer(targetHex6) {
       }
     }
 
-    const outImg = new PhotonImage(outBuf, width, height);
-    try {
-      return outImg.get_bytes().buffer;
-    } finally {
-      outImg.free();
+    if (merged.wasmImage && typeof PhotonImageCtor === 'function') {
+      const outImg = new PhotonImageCtor(outBuf, width, height);
+      try {
+        return outImg.get_bytes().buffer;
+      } finally {
+        outImg.free();
+      }
     }
+    return encodeRawRgbaToPng(outBuf, width, height);
   } finally {
-    canvas.free();
+    if (merged.wasmImage) {
+      merged.wasmImage.free();
+    }
   }
 }
 
@@ -967,14 +1146,12 @@ function computeSectorRect(totalWidth, totalHeight, areaCode) {
 }
 
 async function createSectorImageBuffer(areaCode = null) {
-  const canvas = await createMergedPhotonImage();
+  const merged = await buildMergedRawRgba();
   try {
-    const width = canvas.get_width();
-    const height = canvas.get_height();
-    const raw = canvas.get_raw_pixels();
-    const buf = new Uint8Array(raw);
-
+    const { width, height, rgba } = merged;
+    const buf = new Uint8Array(rgba);
     const sector = computeSectorRect(width, height, areaCode);
+
     if (!sector) {
       const cols = SECTOR_COLS.length;
       const rows = SECTOR_ROWS.length;
@@ -988,12 +1165,16 @@ async function createSectorImageBuffer(areaCode = null) {
           drawRectOutline(buf, width, height, x0 + 4, y0 + 4, x1 - 4, y1 - 4, 2, [20, 24, 32, 225]);
         }
       }
-      const gridImg = new PhotonImage(buf, width, height);
-      try {
-        return gridImg.get_bytes().buffer;
-      } finally {
-        gridImg.free();
+
+      if (merged.wasmImage && typeof PhotonImageCtor === 'function') {
+        const gridImg = new PhotonImageCtor(buf, width, height);
+        try {
+          return gridImg.get_bytes().buffer;
+        } finally {
+          gridImg.free();
+        }
       }
+      return encodeRawRgbaToPng(buf, width, height);
     }
 
     const subW = sector.width;
@@ -1012,14 +1193,19 @@ async function createSectorImageBuffer(areaCode = null) {
       }
     }
 
-    const croppedImg = new PhotonImage(subBuf, subW, subH);
-    try {
-      return croppedImg.get_bytes().buffer;
-    } finally {
-      croppedImg.free();
+    if (merged.wasmImage && typeof PhotonImageCtor === 'function') {
+      const croppedImg = new PhotonImageCtor(subBuf, subW, subH);
+      try {
+        return croppedImg.get_bytes().buffer;
+      } finally {
+        croppedImg.free();
+      }
     }
+    return encodeRawRgbaToPng(subBuf, subW, subH);
   } finally {
-    canvas.free();
+    if (merged.wasmImage) {
+      merged.wasmImage.free();
+    }
   }
 }
 
@@ -1036,7 +1222,11 @@ function buildMapComponents(filename, captionText, accentColor = 0x4093e4) {
         sepComp(),
         actionRowComp([
           buttonComp({ customId: 'map_refresh', label: '最新画像に更新', style: BUTTON_PRIMARY }),
-          buttonComp({ customId: 'map_my_highlight', label: '自国をハイライト', style: BUTTON_SECONDARY }),
+          buttonComp({
+            customId: 'map_my_highlight',
+            label: '自国をハイライト',
+            style: BUTTON_SECONDARY,
+          }),
         ]),
       ],
     }),
@@ -1095,9 +1285,10 @@ function buildNationsCardComponents(guildRoles, members = []) {
     colorRoles.length > 0
       ? colorRoles.map((r, idx) => {
           const hex = formatHex6(r.color);
-          const countText = Array.isArray(members) && members.length > 0
-            ? `${countByRoleId.get(r.id) || 0}名`
-            : '集計対象外';
+          const countText =
+            Array.isArray(members) && members.length > 0
+              ? `${countByRoleId.get(r.id) || 0}名`
+              : '集計対象外';
           return `${idx + 1}. **${sanitizeDisplayText(r.name)}** — \`#${hex}\`（${countText}）`;
         })
       : ['サーバー内にwplaceカラーロールは見つかりませんでした。'];
@@ -1106,7 +1297,9 @@ function buildNationsCardComponents(guildRoles, members = []) {
     containerComp({
       accentColor: 0x28509e,
       components: [
-        textComp(`**jplace 国家一覧**\n登録カラーロール数: ${colorRoles.length}件\n\n${lines.join('\n')}`),
+        textComp(
+          `**jplace 国家一覧**\n登録カラーロール数: ${colorRoles.length}件\n\n${lines.join('\n')}`
+        ),
         sepComp(),
         actionRowComp([
           buttonComp({ customId: 'nations_refresh', label: '最新情報に更新', style: BUTTON_PRIMARY }),
@@ -1133,7 +1326,11 @@ function buildColorPanelComponents(mode = 'palette', guildRoles = []) {
           textComp(`**作成済みカラーロール一覧**\n合計: ${colorRoles.length}件\n\n${lines.join('\n')}`),
           sepComp(),
           actionRowComp([
-            buttonComp({ customId: 'color_panel_palette', label: '標準パレットへ切替', style: BUTTON_SECONDARY }),
+            buttonComp({
+              customId: 'color_panel_palette',
+              label: '標準パレットへ切替',
+              style: BUTTON_SECONDARY,
+            }),
           ]),
         ],
       }),
@@ -1148,7 +1345,11 @@ function buildColorPanelComponents(mode = 'palette', guildRoles = []) {
         textComp(`**wplace 標準カラーパレット（全${WPLACE_COLORS.length}色）**\n\n${lines.join('\n')}`),
         sepComp(),
         actionRowComp([
-          buttonComp({ customId: 'color_panel_created', label: '作成済み一覧へ切替', style: BUTTON_PRIMARY }),
+          buttonComp({
+            customId: 'color_panel_created',
+            label: '作成済み一覧へ切替',
+            style: BUTTON_PRIMARY,
+          }),
         ]),
       ],
     }),
@@ -1300,14 +1501,17 @@ async function postMapToChannel(env, channelId, captionText = '定期戦況マ�
     { ephemeral: false }
   );
 
-  const res = await fetch(`https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}/messages`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bot ${env.DISCORD_TOKEN}`,
-      ...payload.headers,
-    },
-    body: payload.body,
-  });
+  const res = await fetch(
+    `https://discord.com/api/v10/channels/${encodeURIComponent(channelId)}/messages`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bot ${env.DISCORD_TOKEN}`,
+        ...payload.headers,
+      },
+      body: payload.body,
+    }
+  );
   if (!res.ok) {
     const errText = await res.text();
     throw new Error(`チャンネル送信に失敗しました (HTTP ${res.status}): ${errText.slice(0, 300)}`);
@@ -1378,12 +1582,14 @@ function handleAutocomplete(interaction) {
 }
 
 // ==========================================
-// Application Command Handler (type: 2)
+// Application Command Handler (type: 2 / 全コマンド Deferred 統一)
 // ==========================================
 function getOptValue(interaction, name) {
   const opt = interaction.data?.options?.find((o) => o.name === name);
   return opt ? opt.value : undefined;
 }
+
+const EPHEMERAL_COMMANDS = new Set(['register', 'help', 'color_match', 'setup_color_roles']);
 
 async function handleApplicationCommand(interaction, env, ctx) {
   const cmdName = interaction.data?.name || '';
@@ -1391,142 +1597,81 @@ async function handleApplicationCommand(interaction, env, ctx) {
   const actorUser = interaction.member?.user || interaction.user || null;
   const resolvedRoles = interaction.data?.resolved?.roles || null;
   const resolvedUsers = interaction.data?.resolved?.users || null;
+  const isEphemeral = EPHEMERAL_COMMANDS.has(cmdName);
 
-  // 1. 即時応答可能な軽量コマンド
-  if (cmdName === 'ping') {
-    const payload = buildV2Payload(
-      infoV2('Pong', ['Jpace-bot v2 は正常に応答しています。'], { ephemeral: false, accentColor: 0x13e67b }),
-      { ephemeral: false }
-    );
-    return new Response(payload.body, { status: 200, headers: payload.headers });
-  }
-
-  if (cmdName === 'help') {
-    const helpLines = [
-      '**戦況マップ・分析**',
-      '- `/now`: 現在の合成マップ表示（更新・自国ハイライトボタン付き）',
-      '- `/post_now`: 指定チャンネルへ戦況マップを送信',
-      '- `/highlight color:<色>`: 指定色を残し他をグレースケール化',
-      '- `/sector area:<A1〜C4>`: 12区画グリッド表示および区画拡大',
-      '',
-      '**国家・外交**',
-      '- `/rename_role name:<名前>`: 自国のwplaceカラーロール名を変更',
-      '- `/nations`: 国家（wplaceカラーロール）一覧を表示',
-      '- `/action type:<種別>`: 公式外交宣言・条約締結を実行',
-      '',
-      '**管理・ユーティリティ**',
-      '- `/setup_color_roles`（管理者限定）: カラーロール一括作成',
-      '- `/color_panel`, `/role_directory`, `/color_match`, `/avatar`, `/server_info`, `/user_info`, `/ping`, `/register`',
-    ];
-    const payload = buildV2Payload(
-      infoV2('Jpace-bot v2 ヘルプ', helpLines, { ephemeral: true, accentColor: 0x4093e4 }),
-      { ephemeral: true }
-    );
-    return new Response(payload.body, { status: 200, headers: payload.headers });
-  }
-
-  if (cmdName === 'color_match') {
-    const queryVal = getOptValue(interaction, 'query');
-    const roleIdVal = getOptValue(interaction, 'role');
-    let sourceHex = '';
-    let sourceLabel = '';
-
-    if (roleIdVal && resolvedRoles?.[roleIdVal]) {
-      const r = resolvedRoles[roleIdVal];
-      sourceHex = formatHex6(r.color);
-      sourceLabel = `ロール「${sanitizeDisplayText(r.name)}」(\`#${sourceHex}\`)`;
-    } else if (queryVal) {
-      const clean = String(queryVal).replace(/^#/, '').trim().toUpperCase();
-      if (/^[0-9A-F]{6}$/.test(clean)) {
-        sourceHex = clean;
-        sourceLabel = `カラーコード \`#${sourceHex}\``;
-      } else {
-        const direct = resolveColorEntry(queryVal);
-        if (direct) {
-          sourceHex = direct.hex;
-          sourceLabel = `指定色「${direct.name}」(\`#${sourceHex}\`)`;
-        }
-      }
-    }
-
-    if (!sourceHex) {
-      const payload = buildV2Payload(
-        errorV2('`#RRGGBB` 形式のカラーコード、色名、または `role` を指定してください。', true),
-        { ephemeral: true }
-      );
-      return new Response(payload.body, { status: 200, headers: payload.headers });
-    }
-
-    const matched = findNearestWplaceColor(sourceHex);
-    const payload = buildV2Payload(
-      infoV2(
-        'wplace カラーマッチング結果',
-        [
-          `入力: ${sourceLabel}`,
-          `最も近い標準色: **${matched.name}** (\`${matched.key}\`) — \`#${matched.hex}\``,
-        ],
-        { ephemeral: true, accentColor: parseInt(matched.hex, 16) }
-      ),
-      { ephemeral: true }
-    );
-    return new Response(payload.body, { status: 200, headers: payload.headers });
-  }
-
-  if (cmdName === 'avatar') {
-    const targetUserId = getOptValue(interaction, 'user') || actorUser?.id;
-    const u = (targetUserId && resolvedUsers?.[targetUserId]) || actorUser;
-    if (!u) {
-      const payload = buildV2Payload(errorV2('ユーザー情報を取得できませんでした。', true), { ephemeral: true });
-      return new Response(payload.body, { status: 200, headers: payload.headers });
-    }
-    const avatarUrl = u.avatar
-      ? `https://cdn.discordapp.com/avatars/${u.id}/${u.avatar}.png?size=512`
-      : `https://cdn.discordapp.com/embed/avatars/${(BigInt(u.id) >> 22n) % 6n}.png`;
-    const comps = [
-      containerComp({
-        accentColor: 0x4093e4,
-        components: [
-          sectionComp(
-            `**アバター表示**\n対象: **${sanitizeDisplayText(u.global_name || u.username)}**`,
-            thumbnailAccessory(avatarUrl, 'ユーザーアバター')
-          ),
-        ],
-      }),
-    ];
-    const payload = buildV2Payload({ components: comps }, { ephemeral: false });
-    return new Response(payload.body, { status: 200, headers: payload.headers });
-  }
-
-  // 2. API呼び出し・画像生成を伴うコマンドは Deferred（type: 5）で即時応答し裏側で処理
-  const isEphemeralDeferred = cmdName === 'register';
   const bgTask = (async () => {
     try {
+      if (cmdName === 'ping') {
+        await sendDeferredWebhookResult(
+          interaction,
+          infoV2('Pong', ['Jpace-bot v2 は正常に応答しています。'], {
+            ephemeral: false,
+            accentColor: 0x13e67b,
+          }),
+          { ephemeral: false }
+        );
+        return;
+      }
+
+      if (cmdName === 'help') {
+        const helpLines = [
+          '**戦況マップ・分析**',
+          '- `/now`: 現在の合成マップ表示（更新・自国ハイライトボタン付き）',
+          '- `/post_now`: 指定チャンネルへ戦況マップを送信',
+          '- `/highlight color:<色>`: 指定色を残し他をグレースケール化',
+          '- `/sector area:<A1〜C4>`: 12区画グリッド表示および区画拡大',
+          '',
+          '**国家・外交**',
+          '- `/rename_role name:<名前>`: 自国のwplaceカラーロール名を変更',
+          '- `/nations`: 国家（wplaceカラーロール）一覧を表示',
+          '- `/action type:<種別>`: 公式外交宣言・条約締結を実行',
+          '',
+          '**管理・ユーティリティ**',
+          '- `/setup_color_roles`（管理者限定）: カラーロール一括作成',
+          '- `/color_panel`, `/role_directory`, `/color_match`, `/avatar`, `/server_info`, `/user_info`, `/ping`, `/register`',
+        ];
+        await sendDeferredWebhookResult(
+          interaction,
+          infoV2('Jpace-bot v2 ヘルプ', helpLines, {
+            ephemeral: true,
+            accentColor: 0x4093e4,
+          }),
+          { ephemeral: true }
+        );
+        return;
+      }
+
       if (cmdName === 'register') {
-        const scopeOpt = getOptValue(interaction, 'scope') || 'auto';
-        const guildIdOverride = scopeOpt === 'guild' ? guildId : null;
-        const reg = await registerSlashCommands(env, {
+        const cleanGuildOpt = getOptValue(interaction, 'clean_guild') === 'yes';
+        const reg = await registerGlobalCommands(env, {
           source: 'slash:/register',
-          scopeMode: scopeOpt,
-          guildIdOverride,
+          cleanGuildId: cleanGuildOpt ? guildId : null,
         });
         if (reg.ok) {
+          const lines = [
+            `スコープ: \`global\` (HTTP ${reg.status})`,
+            `登録数: ${reg.registered.length}件`,
+            `コマンド: ${reg.registered.map((n) => `\`/${n}\``).join(', ')}`,
+          ];
+          if (cleanGuildOpt) {
+            lines.push(
+              reg.guildCleaned
+                ? `対象サーバー (\`${guildId || '不明'}\`) のギルドコマンドをクリアしました。`
+                : 'ギルドコマンドのクリアに失敗したか対象サーバーが不明です。'
+            );
+          }
           await sendDeferredWebhookResult(
             interaction,
-            infoV2(
-              'コマンド登録完了',
-              [
-                `スコープ: \`${reg.scope}\` (HTTP ${reg.status})`,
-                `登録数: ${reg.registered.length}件`,
-                `コマンド: ${reg.registered.map((n) => `\`/${n}\``).join(', ')}`,
-              ],
-              { ephemeral: true, accentColor: 0x13e67b }
-            ),
+            infoV2('グローバルコマンド登録完了', lines, {
+              ephemeral: true,
+              accentColor: 0x13e67b,
+            }),
             { ephemeral: true }
           );
         } else {
           await sendDeferredWebhookResult(
             interaction,
-            errorV2(`理由: ${reg.reason}\nスコープ: \`${reg.scope}\``, true),
+            errorV2(`理由: ${reg.reason}\nスコープ: \`global\``, true),
             { ephemeral: true }
           );
         }
@@ -1558,10 +1703,10 @@ async function handleApplicationCommand(interaction, env, ctx) {
         await sendDeferredWebhookResult(
           interaction,
           infoV2('送信完了', [`チャンネル <#${CHANNEL_ID}> へ最新戦況マップを送信しました。`], {
-            ephemeral: true,
+            ephemeral: false,
             accentColor: 0x13e67b,
           }),
-          { ephemeral: true }
+          { ephemeral: false }
         );
         return;
       }
@@ -1572,7 +1717,10 @@ async function handleApplicationCommand(interaction, env, ctx) {
         if (!entry) {
           await sendDeferredWebhookResult(
             interaction,
-            errorV2('指定された色が見つかりませんでした。候補から選択するか `#RRGGBB` を指定してください。', true),
+            errorV2(
+              '指定された色が見つかりませんでした。候補から選択するか `#RRGGBB` を指定してください。',
+              true
+            ),
             { ephemeral: true }
           );
           return;
@@ -1659,7 +1807,10 @@ async function handleApplicationCommand(interaction, env, ctx) {
         if (!patchRes.ok) {
           await sendDeferredWebhookResult(
             interaction,
-            errorV2(`ロール名の変更に失敗しました (HTTP ${patchRes.status})。Botのロール管理権限を確認してください。`, true),
+            errorV2(
+              `ロール名の変更に失敗しました (HTTP ${patchRes.status})。Botのロール管理権限を確認してください。`,
+              true
+            ),
             { ephemeral: true }
           );
           return;
@@ -1711,6 +1862,87 @@ async function handleApplicationCommand(interaction, env, ctx) {
         return;
       }
 
+      if (cmdName === 'color_match') {
+        const queryVal = getOptValue(interaction, 'query');
+        const roleIdVal = getOptValue(interaction, 'role');
+        let sourceHex = '';
+        let sourceLabel = '';
+
+        if (roleIdVal && resolvedRoles?.[roleIdVal]) {
+          const r = resolvedRoles[roleIdVal];
+          sourceHex = formatHex6(r.color);
+          sourceLabel = `ロール「${sanitizeDisplayText(r.name)}」(\`#${sourceHex}\`)`;
+        } else if (queryVal) {
+          const clean = String(queryVal).replace(/^#/, '').trim().toUpperCase();
+          if (/^[0-9A-F]{6}$/.test(clean)) {
+            sourceHex = clean;
+            sourceLabel = `カラーコード \`#${sourceHex}\``;
+          } else {
+            const direct = resolveColorEntry(queryVal);
+            if (direct) {
+              sourceHex = direct.hex;
+              sourceLabel = `指定色「${direct.name}」(\`#${sourceHex}\`)`;
+            }
+          }
+        }
+
+        if (!sourceHex) {
+          await sendDeferredWebhookResult(
+            interaction,
+            errorV2('`#RRGGBB` 形式のカラーコード、色名、または `role` を指定してください。', true),
+            { ephemeral: true }
+          );
+          return;
+        }
+
+        const matched = findNearestWplaceColor(sourceHex);
+        await sendDeferredWebhookResult(
+          interaction,
+          infoV2(
+            'wplace カラーマッチング結果',
+            [
+              `入力: ${sourceLabel}`,
+              `最も近い標準色: **${matched.name}** (\`${matched.key}\`) — \`#${matched.hex}\``,
+            ],
+            { ephemeral: true, accentColor: parseInt(matched.hex, 16) }
+          ),
+          { ephemeral: true }
+        );
+        return;
+      }
+
+      if (cmdName === 'avatar') {
+        const targetUserId = getOptValue(interaction, 'user') || actorUser?.id;
+        const u =
+          (targetUserId && resolvedUsers?.[targetUserId]) ||
+          (targetUserId && targetUserId !== actorUser?.id
+            ? await discordApi(env, `/users/${targetUserId}`).then((r) => (r.ok ? r.json() : null))
+            : actorUser);
+
+        if (!u) {
+          await sendDeferredWebhookResult(interaction, errorV2('ユーザー情報を取得できませんでした。', true), {
+            ephemeral: true,
+          });
+          return;
+        }
+        const avatarUrl = u.avatar
+          ? `https://cdn.discordapp.com/avatars/${u.id}/${u.avatar}.png?size=512`
+          : `https://cdn.discordapp.com/embed/avatars/${(BigInt(u.id) >> 22n) % 6n}.png`;
+        const comps = [
+          containerComp({
+            accentColor: 0x4093e4,
+            components: [
+              sectionComp(
+                `**アバター表示**\n対象: **${sanitizeDisplayText(u.global_name || u.username)}**`,
+                thumbnailAccessory(avatarUrl, 'ユーザーアバター')
+              ),
+            ],
+          }),
+        ];
+        await sendDeferredWebhookResult(interaction, { components: comps }, { ephemeral: false });
+        return;
+      }
+
       if (cmdName === 'setup_color_roles') {
         if (!guildId || !actorUser?.id) {
           await sendDeferredWebhookResult(interaction, errorV2('サーバー内で実行してください。', true), {
@@ -1729,7 +1961,10 @@ async function handleApplicationCommand(interaction, env, ctx) {
         }
 
         const rawLimit = Number(getOptValue(interaction, 'limit') ?? 20);
-        const limit = Math.max(1, Math.min(WPLACE_COLORS.length, Number.isFinite(rawLimit) ? rawLimit : 20));
+        const limit = Math.max(
+          1,
+          Math.min(WPLACE_COLORS.length, Number.isFinite(rawLimit) ? rawLimit : 20)
+        );
         const existingRoles = await fetchGuildRoles(env, guildId);
         const existingHexes = new Set(existingRoles.map((r) => formatHex6(r.color)));
 
@@ -1758,11 +1993,7 @@ async function handleApplicationCommand(interaction, env, ctx) {
           interaction,
           infoV2(
             'wplace カラーロール セットアップ完了',
-            [
-              `対象色数: ${limit}色`,
-              `新規作成: ${createdCount}件`,
-              `既存スキップ: ${skippedCount}件`,
-            ],
+            [`対象色数: ${limit}色`, `新規作成: ${createdCount}件`, `既存スキップ: ${skippedCount}件`],
             { ephemeral: true, accentColor: 0x13e67b }
           ),
           { ephemeral: true }
@@ -1799,7 +2030,9 @@ async function handleApplicationCommand(interaction, env, ctx) {
 
         const actorResolved = resolveTargetWplaceRole(guildRoles, member, myRoleId, resolvedRoles);
         if (actorResolved.error) {
-          await sendDeferredWebhookResult(interaction, errorV2(actorResolved.error, true), { ephemeral: true });
+          await sendDeferredWebhookResult(interaction, errorV2(actorResolved.error, true), {
+            ephemeral: true,
+          });
           return;
         }
         const actorRole = actorResolved.role;
@@ -1807,7 +2040,8 @@ async function handleApplicationCommand(interaction, env, ctx) {
         let targetRole = null;
         if (targetRoleId) {
           const tRole =
-            guildRoles.find((r) => r.id === targetRoleId) || (resolvedRoles ? resolvedRoles[targetRoleId] : null);
+            guildRoles.find((r) => r.id === targetRoleId) ||
+            (resolvedRoles ? resolvedRoles[targetRoleId] : null);
           if (!tRole || !isWplaceColorRole(tRole)) {
             await sendDeferredWebhookResult(
               interaction,
@@ -1817,9 +2051,11 @@ async function handleApplicationCommand(interaction, env, ctx) {
             return;
           }
           if (tRole.id === actorRole.id) {
-            await sendDeferredWebhookResult(interaction, errorV2('自国ロールを対象に指定することはできません。', true), {
-              ephemeral: true,
-            });
+            await sendDeferredWebhookResult(
+              interaction,
+              errorV2('自国ロールを対象に指定することはできません。', true),
+              { ephemeral: true }
+            );
             return;
           }
           targetRole = tRole;
@@ -1904,11 +2140,11 @@ async function handleApplicationCommand(interaction, env, ctx) {
           interaction,
           infoV2(
             `ユーザー情報 — ${uObj?.global_name || uObj?.username || targetUserId}`,
-            [
-              `ユーザーID: \`${targetUserId}\``,
-              `所属wplaceカラーロール: ${wText}`,
-            ],
-            { ephemeral: false, accentColor: wRoles[0] ? parseInt(formatHex6(wRoles[0].color), 16) : 0x4093e4 }
+            [`ユーザーID: \`${targetUserId}\``, `所属wplaceカラーロール: ${wText}`],
+            {
+              ephemeral: false,
+              accentColor: wRoles[0] ? parseInt(formatHex6(wRoles[0].color), 16) : 0x4093e4,
+            }
           ),
           { ephemeral: false }
         );
@@ -1934,7 +2170,7 @@ async function handleApplicationCommand(interaction, env, ctx) {
   return new Response(
     JSON.stringify({
       type: RESPONSE_DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
-      data: { flags: isEphemeralDeferred ? FLAG_EPHEMERAL_V2 : FLAG_IS_COMPONENTS_V2 },
+      data: { flags: isEphemeral ? FLAG_EPHEMERAL_V2 : FLAG_IS_COMPONENTS_V2 },
     }),
     { status: 200, headers: { 'Content-Type': 'application/json' } }
   );
@@ -1977,7 +2213,6 @@ async function handleMessageComponent(interaction, env, ctx) {
   const guildId = interaction.guild_id || null;
   const actorUser = interaction.member?.user || interaction.user || null;
 
-  // 1. 自国ハイライトボタン（本人のみに見えるエフェメラル画像）
   if (customId === 'map_my_highlight') {
     const bgTask = (async () => {
       try {
@@ -2039,7 +2274,6 @@ async function handleMessageComponent(interaction, env, ctx) {
     );
   }
 
-  // 2. 元メッセージを更新するコンポーネント操作（type: 6）
   const bgUpdateTask = (async () => {
     try {
       if (customId === 'map_refresh') {
@@ -2088,7 +2322,6 @@ async function handleMessageComponent(interaction, env, ctx) {
         return;
       }
 
-      // 合意型ボタン: act_accept:<actionType>:<fromRoleId>:<toRoleId> / act_reject:... / act_cancel:...
       const actMatch = customId.match(/^(act_accept|act_reject|act_cancel):([^:]+):([^:]+):([^:]+)$/);
       if (actMatch) {
         const [, op, actionType, fromRoleId, toRoleId] = actMatch;
@@ -2118,21 +2351,19 @@ async function handleMessageComponent(interaction, env, ctx) {
 
         const spec = ACTION_TYPE_MAP.get(actionType);
         const statusText =
-          op === 'act_accept'
-            ? '締結成立'
-            : op === 'act_reject'
-              ? '拒否・不成立'
-              : '提案取下げ';
+          op === 'act_accept' ? '締結成立' : op === 'act_reject' ? '拒否・不成立' : '提案取下げ';
 
         const currentText =
-          interaction.message?.components?.[0]?.components?.[0]?.content || `**${spec?.label || '外交提案'}**`;
+          interaction.message?.components?.[0]?.components?.[0]?.content ||
+          `**${spec?.label || '外交提案'}**`;
         const updatedText = currentText.replace(/状態:\s*\*\*[^*]+\*\*/, `状態: **${statusText}**`);
-        const updatedComps = stripActionRows(replaceFirstTextDisplay(interaction.message?.components || [], updatedText));
+        const updatedComps = stripActionRows(
+          replaceFirstTextDisplay(interaction.message?.components || [], updatedText)
+        );
         await sendDeferredWebhookResult(interaction, { components: updatedComps });
         return;
       }
 
-      // 永世中立宣言の公認・取消: neutral_approve:<fromRoleId> / neutral_revoke:<fromRoleId>
       const neutralMatch = customId.match(/^(neutral_approve|neutral_revoke):([^:]+)$/);
       if (neutralMatch) {
         const [, op, fromRoleId] = neutralMatch;
@@ -2180,12 +2411,19 @@ async function handleMessageComponent(interaction, env, ctx) {
         }
 
         const nextLines = Array.from(nextSet);
-        const approvedBlock = nextLines.length > 0 ? nextLines.join('\n') : '- まだ公認国はありません';
+        const approvedBlock =
+          nextLines.length > 0 ? nextLines.join('\n') : '- まだ公認国はありません';
         const updatedText = currentText.includes('公認国一覧:')
-          ? currentText.replace(/公認国一覧:\s*\n[\s\S]*?(\n\n|$)/, `公認国一覧:\n${approvedBlock}$1`)
+          ? currentText.replace(
+              /公認国一覧:\s*\n[\s\S]*?(\n\n|$)/,
+              `公認国一覧:\n${approvedBlock}$1`
+            )
           : `${currentText}\n公認国一覧:\n${approvedBlock}`;
 
-        const updatedComps = replaceFirstTextDisplay(interaction.message?.components || [], updatedText);
+        const updatedComps = replaceFirstTextDisplay(
+          interaction.message?.components || [],
+          updatedText
+        );
         await sendDeferredWebhookResult(interaction, { components: updatedComps });
         return;
       }
@@ -2207,13 +2445,11 @@ async function handleMessageComponent(interaction, env, ctx) {
 // ==========================================
 export default {
   async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-
     if (request.method === 'GET') {
       if (ctx?.waitUntil) {
-        ctx.waitUntil(registerSlashCommandsIfNeeded(env, null));
+        ctx.waitUntil(registerGlobalCommandsIfNeeded(env));
       } else {
-        await registerSlashCommandsIfNeeded(env, null);
+        await registerGlobalCommandsIfNeeded(env);
       }
       return new Response('Jpace-bot v2 worker is running', {
         status: 200,
@@ -2239,7 +2475,7 @@ export default {
     }
 
     if (ctx?.waitUntil) {
-      ctx.waitUntil(registerSlashCommandsIfNeeded(env, interaction.guild_id || null));
+      ctx.waitUntil(registerGlobalCommandsIfNeeded(env));
     }
 
     if (interaction.type === INTERACTION_PING) {
@@ -2261,14 +2497,16 @@ export default {
       return await handleMessageComponent(interaction, env, ctx);
     }
 
-    const fallback = infoV2('未対応のインタラクション', `type: ${interaction.type}`, { ephemeral: true });
+    const fallback = infoV2('未対応のインタラクション', `type: ${interaction.type}`, {
+      ephemeral: true,
+    });
     const payload = buildV2Payload(fallback, { ephemeral: true });
     return new Response(payload.body, { status: 200, headers: payload.headers });
   },
 
   async scheduled(_event, env, ctx) {
     const task = (async () => {
-      await registerSlashCommandsIfNeeded(env, null);
+      await registerGlobalCommandsIfNeeded(env);
       if (CHANNEL_ID) {
         await postMapToChannel(env, CHANNEL_ID, '定期配信された最新戦況マップ');
       }
