@@ -1,4 +1,4 @@
-import photonPkg, { PhotonImage } from 'photon-wasm';
+import * as photonNs, { PhotonImage } from 'photon-wasm';
 
 const CHANNEL_ID = '1507371465744580739';
 
@@ -89,20 +89,16 @@ async function ensureWasmInit() {
   if (!wasmInitPromise) {
     wasmInitPromise = (async () => {
       try {
-        const exportsKeys = photonPkg && typeof photonPkg === 'object' ? Object.keys(photonPkg) : [];
+        const keys = photonNs && typeof photonNs === 'object' ? Object.keys(photonNs) : [];
+        const initFn = photonNs?.init || photonNs?.default || null;
         console.log('[wasm] photon-wasm 初期化チェック開始', {
-          pkgType: typeof photonPkg,
-          hasDefaultFn: typeof photonPkg === 'function',
-          hasInitFn: typeof photonPkg?.default === 'function' || typeof photonPkg?.init === 'function',
-          exportsKeys,
+          hasInitFn: typeof initFn === 'function',
+          hasPhotonImage: typeof PhotonImage === 'function',
+          exportsKeys: keys,
         });
 
-        if (typeof photonPkg === 'function') {
-          await photonPkg();
-        } else if (typeof photonPkg?.default === 'function') {
-          await photonPkg.default();
-        } else if (typeof photonPkg?.init === 'function') {
-          await photonPkg.init();
+        if (typeof initFn === 'function') {
+          await initFn();
         }
 
         wasmInitialized = true;
