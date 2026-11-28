@@ -901,7 +901,6 @@ function encodeRawRgbaToPng(rgbaBuf, width, height) {
     rawScanlines.set(rgbaBuf.subarray(srcOffset, srcOffset + width * 4), dstOffset + 1);
   }
 
-  // Zlib stream with stored (uncompressed) DEFLATE blocks (max 65535 bytes per block)
   const blocks = [];
   let totalDeflateLen = 0;
   let offset = 0;
@@ -961,9 +960,9 @@ function encodeRawRgbaToPng(rgbaBuf, width, height) {
 }
 
 // ==========================================
-// 画像生成・加工（PhotonImage + メモリ安全管理）
+// 画像生成・加工（タイムアウト保護 + メモリ安全管理）
 // ==========================================
-async function fetchTileEntries() {
+async function fetchTileEntries(timeoutMs = 2200) {
   const tasks = [];
   for (let y = 0; y < 4; y++) {
     for (let x = 0; x < 4; x++) {
@@ -971,13 +970,20 @@ async function fetchTileEntries() {
       const tileY = 784 + y;
       const url = `https://backend.wplace.live/files/s0/tiles/${tileX}/${tileY}.png`;
       tasks.push(
-        fetch(url)
-          .then(async (res) => {
+        (async () => {
+          try {
+            const signal =
+              typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+                ? AbortSignal.timeout(timeoutMs)
+                : undefined;
+            const res = await fetch(url, signal ? { signal } : undefined);
             if (!res.ok) return null;
             const ab = await res.arrayBuffer();
             return { bytes: new Uint8Array(ab), x, y };
-          })
-          .catch(() => null)
+          } catch {
+            return null;
+          }
+        })()
       );
     }
   }
@@ -994,7 +1000,7 @@ async function buildMergedRawRgba() {
     baseBuf[i + 3] = 255;
   }
 
-  const tiles = await fetchTileEntries();
+  const tiles = await fetchTileEntries(2200);
   const canUseWasm = await ensureWasmReady();
 
   if (canUseWasm && typeof PhotonImageCtor === 'function') {
@@ -1024,7 +1030,6 @@ async function buildMergedRawRgba() {
     }
   }
 
-  // フォールバック（単色背景＋PNG IHDR/IDAT 簡易抽出が可能な場合の描画）
   return {
     width: CROP_WIDTH,
     height: CROP_HEIGHT,
@@ -1483,11 +1488,19 @@ async function sendDeferredWebhookResult(interaction, result, { ephemeral = fals
   const endpoint = `https://discord.com/api/v10/webhooks/${encodeURIComponent(appId)}/${encodeURIComponent(token)}/messages/@original`;
   const payload = buildV2Payload(result, { ephemeral });
 
-  await fetch(endpoint, {
-    method: 'PATCH',
-    headers: payload.headers,
-    body: payload.body,
-  });
+  try {
+    const res = await fetch(endpoint, {
+      method: 'PATCH',
+      headers: payload.headers,
+      body: payload.body,
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      console.error('[webhook] PATCH 失敗:', { status: res.status, body: errText.slice(0, 300) });
+    }
+  } catch (err) {
+    console.error('[webhook] PATCH 通信エラー:', { message: err?.message || String(err) });
+  }
 }
 
 async function postMapToChannel(env, channelId, captionText = '定期戦況マップ') {
