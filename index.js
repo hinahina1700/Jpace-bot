@@ -620,4 +620,612 @@ function infoV2(title, lines, { ephemeral = false, accentColor = null, component
     components: [
       containerComp({
         accentColor,
-        components: [textCo
+        components: [textComp(`**${title}**\n${bodyText}`), ...componentsExtra],
+      }),
+    ],
+  };
+}
+
+// ==========================================
+// 画像生成・加工（PhotonImage メモリ安全管理）
+// ==========================================
+async function createMergedPhotonImage() {
+  await ensureWasmInit();
+
+  const canvasBuffer = new Uint8Array(CROP_WIDTH * CROP_HEIGHT * 4);
+  for (let i = 0; i < canvasBuffer.length; i += 4) {
+    canvasBuffer[i] = 138;     // R (#8aacf6)
+    canvasBuffer[i + 1] = 172; // G
+    canvasBuffer[i + 2] = 246; // B
+    canvasBuffer[i + 3] = 255; // Alpha
+  }
+
+  const canvas = new PhotonImage(canvasBuffer, CROP_WIDTH, CROP_HEIGHT);
+  try {
+    const fetchPromises = [];
+    for (let y = 0; y < 4; y++) {
+      for (let x = 0; x < 4; x++) {
+        const tileX = 1877 + x;
+        const tileY = 784 + y;
+        const url = `https://backend.wplace.live/files/s0/tiles/${tileX}/${tileY}.png`;
+
+        fetchPromises.push(
+          fetch(url)
+            .then(async (res) => {
+              if (!res.ok) return null;
+              const arrayBuffer = await res.arrayBuffer();
+              const tileImg = PhotonImage.new_from_byteslice(new Uint8Array(arrayBuffer));
+              return { tileImg, x, y };
+            })
+            .catch(() => null)
+        );
+      }
+    }
+
+    const results = await Promise.all(fetchPromises);
+    let loadedCount = 0;
+    for (const item of results) {
+      if (item && item.tileImg) {
+        try {
+          const posX = item.x * 1000 - CROP_X;
+          const posY = item.y * 1000 - CROP_Y;
+          canvas.blend(item.tileImg, posX, posY, 'over');
+          loadedCount++;
+        } finally {
+          item.tileImg.free();
+        }
+      }
+    }
+    console.log('[map] タイル合成完了', { loadedCount, total: fetchPromises.length });
+
+    return canvas;
+  } catch (err) {
+    canvas.free();
+    throw err;
+  }
+}
+
+async function createMergedImageBuffer() {
+  const canvas = await createMergedPhotonImage();
+  try {
+    return canvas.get_bytes().buffer;
+  } finally {
+    canvas.free();
+  }
+}
+
+function drawRectOutline(buf, width, height, x0, y0, x1, y1, thickness, rgba) {
+  const [r, g, b, a] = rgba;
+  const clampedX0 = Math.max(0, Math.floor(x0));
+  const clampedY0 = Math.max(0, Math.floor(y0));
+  const clampedX1 = Math.min(width - 1, Math.ceil(x1));
+  const clampedY1 = Math.min(height - 1, Math.ceil(y1));
+
+  const putPixel = (px, py) => {
+    if (px < 0 || px >= width || py < 0 || py >= height) return;
+    const idx = (py * width + px) * 4;
+    buf[idx] = r;
+    buf[idx + 1] = g;
+    buf[idx + 2] = b;
+    buf[idx + 3] = a;
+  };
+
+  for (let t = 0; t < thickness; t++) {
+    for (let x = clampedX0; x <= clampedX1; x++) {
+      putPixel(x, clampedY0 + t);
+      putPixel(x, clampedY1 - t);
+    }
+    for (let y = clampedY0; y <= clampedY1; y++) {
+      putPixel(clampedX0 + t, y);
+      putPixel(clampedX1 - t, y);
+    }
+  }
+}
+
+function parseSectorArea(areaCode) {
+  if (!areaCode) return null;
+  const norm = String(areaCode).trim().toUpperCase();
+  if (!/^[ABC][1234]$/.test(norm)) return null;
+  const colIdx = SECTOR_COLS.indexOf(norm[0]);
+  const rowIdx = SECTOR_ROWS.indexOf(norm[1]);
+  if (colIdx < 0 || rowIdx < 0) return null;
+
+  const cellW = CROP_WIDTH / 3;
+  const cellH = CROP_HEIGHT / 4;
+  const x = Math.round(colIdx * cellW);
+  const y = Math.round(rowIdx * cellH);
+  const nextX = Math.round((colIdx + 1) * cellW);
+  const nextY = Math.round((rowIdx + 1) * cellH);
+
+  return {
+    code: norm,
+    colIndex: colIdx,
+    rowIndex: rowIdx,
+    x,
+    y,
+    width: Math.max(1, nextX - x),
+    height: Math.max(1, nextY - y),
+  };
+}
+
+async function createSectorImageBuffer(areaCode = null) {
+  const canvas = await createMergedPhotonImage();
+  try {
+    const width = canvas.get_width();
+    const height = canvas.get_height();
+    const raw = canvas.get_raw_pixels();
+    const buf = new Uint8Array(raw);
+
+    const sector = parseSectorArea(areaCode);
+    if (!sector) {
+      for (let c = 0; c < 3; c++) {
+        for (let r = 0; r < 4; r++) {
+          const x0 = Math.round((c * width) / 3);
+          const y0 = Math.round((r * height) / 4);
+          const x1 = Math.round(((c + 1) * width) / 3) - 1;
+          const y1 = Math.round(((r + 1) * height) / 4) - 1;
+          drawRectOutline(buf, width, height, x0, y0, x1, y1, 4, [255, 255, 255, 230]);
+          drawRectOutline(buf, width, height, x0 + 4, y0 + 4, x1 - 4, y1 - 4, 2, [20, 24, 32, 220]);
+        }
+      }
+      const gridImg = new PhotonImage(buf, width, height);
+      try {
+        return gridImg.get_bytes().buffer;
+      } finally {
+        gridImg.free();
+      }
+    }
+
+    const subW = sector.width;
+    const subH = sector.height;
+    const subBuf = new Uint8Array(subW * subH * 4);
+    for (let dy = 0; dy < subH; dy++) {
+      const sy = sector.y + dy;
+      for (let dx = 0; dx < subW; dx++) {
+        const sx = sector.x + dx;
+        const srcIdx = (sy * width + sx) * 4;
+        const dstIdx = (dy * subW + dx) * 4;
+        subBuf[dstIdx] = buf[srcIdx];
+        subBuf[dstIdx + 1] = buf[srcIdx + 1];
+        subBuf[dstIdx + 2] = buf[srcIdx + 2];
+        subBuf[dstIdx + 3] = buf[srcIdx + 3];
+      }
+    }
+
+    const croppedImg = new PhotonImage(subBuf, subW, subH);
+    try {
+      return croppedImg.get_bytes().buffer;
+    } finally {
+      croppedImg.free();
+    }
+  } finally {
+    canvas.free();
+  }
+}
+
+// ==========================================
+// Components V2 Card Builders
+// ==========================================
+function buildMapComponents(filename, captionText, accentColor = 0x4093e4) {
+  return [
+    containerComp({
+      accentColor,
+      components: [
+        textComp(`**jplace 戦況マップ**\n${captionText}`),
+        mediaGalleryComp(filename, 'jplace 合成マップ'),
+        sepComp(),
+        actionRowComp([
+          buttonComp({ customId: 'map_refresh', label: '最新画像に更新', style: BUTTON_PRIMARY }),
+          buttonComp({ customId: 'map_my_highlight', label: '自国をハイライト', style: BUTTON_SECONDARY }),
+        ]),
+      ],
+    }),
+  ];
+}
+
+function buildSectorSelectRow(selectedArea = null) {
+  const options = [];
+  for (const r of SECTOR_ROWS) {
+    for (const c of SECTOR_COLS) {
+      const code = `${c}${r}`;
+      options.push({
+        label: `区画 ${code}`,
+        value: code,
+        description: `横${c}列 / 縦${r}行（${code}）へ拡大`,
+        default: selectedArea === code,
+      });
+    }
+  }
+  return actionRowComp([
+    stringSelectComp({
+      customId: 'sector_select',
+      placeholder: selectedArea ? `選択中: ${selectedArea}（別区画へ切替）` : '区画（A1〜C4）を選択して拡大',
+      options,
+    }),
+  ]);
+}
+
+// ==========================================
+// Webhook Followup Sender (タイムアウト回避用)
+// ==========================================
+async function sendDeferredWebhookResult(interaction, result, { ephemeral = false } = {}) {
+  const appId = interaction.application_id;
+  const token = interaction.token;
+  if (!appId || !token) {
+    console.error('[webhook] application_id または token がありません');
+    return;
+  }
+
+  const endpoint = `https://discord.com/api/v10/webhooks/${encodeURIComponent(appId)}/${encodeURIComponent(token)}/messages/@original`;
+  const payload = buildV2Payload(result, { ephemeral });
+
+  try {
+    const res = await fetch(endpoint, {
+      method: 'PATCH',
+      headers: payload.headers,
+      body: payload.body,
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      console.error('[webhook] 元の応答の更新に失敗しました', {
+        status: res.status,
+        body: text.slice(0, 500),
+      });
+    } else {
+      console.log('[webhook] 元の応答を更新しました', { status: res.status });
+    }
+  } catch (err) {
+    console.error('[webhook] Webhook送信中に通信エラーが発生しました', {
+      message: err?.message || String(err),
+    });
+  }
+}
+
+// ==========================================
+// Discord Ed25519 Signature Verification
+// ==========================================
+function hexToUint8Array(hex) {
+  const clean = String(hex || '').trim();
+  const bytes = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+async function verifyDiscordSignature(request, rawBodyText, publicKeyHex) {
+  if (!publicKeyHex) {
+    console.warn('[sig] DISCORD_PUBLIC_KEY が未設定のため署名検証をスキップします');
+    return true;
+  }
+  const signatureHex = request.headers.get('x-signature-ed25519');
+  const timestamp = request.headers.get('x-signature-timestamp');
+  if (!signatureHex || !timestamp) {
+    console.warn('[sig] 署名ヘッダーが不足しています', {
+      hasSignature: Boolean(signatureHex),
+      hasTimestamp: Boolean(timestamp),
+    });
+    return false;
+  }
+
+  try {
+    const key = await crypto.subtle.importKey(
+      'raw',
+      hexToUint8Array(publicKeyHex),
+      { name: 'Ed25519' },
+      false,
+      ['verify']
+    );
+    const msg = new TextEncoder().encode(timestamp + rawBodyText);
+    const ok = await crypto.subtle.verify('Ed25519', key, hexToUint8Array(signatureHex), msg);
+    if (!ok) {
+      console.warn('[sig] 署名検証に失敗しました');
+    }
+    return ok;
+  } catch (err) {
+    console.error('[sig] 署名検証中にエラーが発生しました', {
+      message: err?.message || String(err),
+    });
+    return false;
+  }
+}
+
+// ==========================================
+// Interaction Handlers
+// ==========================================
+async function handleApplicationCommand(interaction, env, ctx) {
+  const cmdName = interaction.data?.name || '';
+  console.log('[interaction] スラッシュコマンドを受信', {
+    cmdName,
+    guildId: interaction.guild_id || null,
+    userId: interaction.member?.user?.id || interaction.user?.id || null,
+  });
+
+  if (cmdName === 'register') {
+    const scopeOpt = interaction.data?.options?.find((o) => o.name === 'scope')?.value || 'auto';
+    const guildIdOverride = scopeOpt === 'guild' ? interaction.guild_id || null : null;
+
+    const regResult = await registerSlashCommands(env, {
+      source: 'slash:/register',
+      scopeMode: scopeOpt,
+      guildIdOverride,
+    });
+
+    if (regResult.ok) {
+      const resObj = infoV2(
+        'スラッシュコマンド登録完了',
+        [
+          `スコープ: \`${regResult.scope}\` (HTTP ${regResult.status})`,
+          `登録コマンド: ${regResult.registered.map((n) => `\`/${n}\``).join(', ')}`,
+          'ログにも `[cmd-reg] コマンド登録成功` を記録しました。',
+        ],
+        { ephemeral: true, accentColor: 0x13e67b }
+      );
+      const payload = buildV2Payload(resObj, { ephemeral: true });
+      return new Response(payload.body, { status: 200, headers: payload.headers });
+    }
+
+    const detailLines = [
+      `理由: ${regResult.reason}`,
+      `スコープ: \`${regResult.scope}\``,
+    ];
+    if (regResult.errorBody) {
+      detailLines.push(`詳細: \`${regResult.errorBody}\``);
+    }
+    const errObj = errorV2(detailLines.join('\n'), true);
+    const payload = buildV2Payload(errObj, { ephemeral: true });
+    return new Response(payload.body, { status: 200, headers: payload.headers });
+  }
+
+  if (cmdName === 'map') {
+    const bgTask = (async () => {
+      try {
+        console.log('[map] 画像生成を開始します');
+        const buffer = await createMergedImageBuffer();
+        const filename = 'jplace-map.png';
+        await sendDeferredWebhookResult(interaction, {
+          file: { name: filename, buffer, description: 'jplace 戦況マップ' },
+          components: buildMapComponents(filename, '最新タイル合成マップを表示中'),
+        });
+      } catch (err) {
+        console.error('[map] 画像生成または送信に失敗しました', {
+          message: err?.message || String(err),
+        });
+        await sendDeferredWebhookResult(
+          interaction,
+          errorV2(err?.message || 'マップ画像の生成に失敗しました', true),
+          { ephemeral: true }
+        );
+      }
+    })();
+
+    if (ctx?.waitUntil) ctx.waitUntil(bgTask);
+
+    return new Response(
+      JSON.stringify({
+        type: RESPONSE_DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+        data: { flags: FLAG_IS_COMPONENTS_V2 },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  if (cmdName === 'sector') {
+    const areaOpt = interaction.data?.options?.find((o) => o.name === 'area')?.value || null;
+    const bgTask = (async () => {
+      try {
+        console.log('[sector] 区画画像生成を開始します', { areaOpt });
+        const buffer = await createSectorImageBuffer(areaOpt);
+        const filename = areaOpt ? `sector-${areaOpt.toUpperCase()}.png` : 'sector-grid.png';
+        const caption = areaOpt ? `区画 ${areaOpt.toUpperCase()} の拡大マップ` : '区画一覧（A1〜C4）グリッド表示';
+        const components = [
+          containerComp({
+            accentColor: 0x10aea6,
+            components: [
+              textComp(`**jplace 区画マップ**\n${caption}`),
+              mediaGalleryComp(filename, caption),
+              sepComp(),
+              buildSectorSelectRow(areaOpt),
+            ],
+          }),
+        ];
+        await sendDeferredWebhookResult(interaction, {
+          file: { name: filename, buffer, description: caption },
+          components,
+        });
+      } catch (err) {
+        console.error('[sector] 区画画像生成または送信に失敗しました', {
+          message: err?.message || String(err),
+        });
+        await sendDeferredWebhookResult(
+          interaction,
+          errorV2(err?.message || '区画マップの生成に失敗しました', true),
+          { ephemeral: true }
+        );
+      }
+    })();
+
+    if (ctx?.waitUntil) ctx.waitUntil(bgTask);
+
+    return new Response(
+      JSON.stringify({
+        type: RESPONSE_DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+        data: { flags: FLAG_IS_COMPONENTS_V2 },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  console.warn('[interaction] 未対応のスラッシュコマンド', { cmdName });
+  const resObj = infoV2('コマンド受信', `\`/${cmdName}\` を受け付けました。`, { ephemeral: true });
+  const payload = buildV2Payload(resObj, { ephemeral: true });
+  return new Response(payload.body, { status: 200, headers: payload.headers });
+}
+
+async function handleMessageComponent(interaction, env, ctx) {
+  const customId = interaction.data?.custom_id || '';
+  console.log('[interaction] コンポーネント操作を受信', {
+    customId,
+    values: interaction.data?.values || null,
+    userId: interaction.member?.user?.id || interaction.user?.id || null,
+  });
+
+  if (customId === 'map_refresh') {
+    const bgTask = (async () => {
+      try {
+        console.log('[map_refresh] 画像再生成を開始します');
+        const buffer = await createMergedImageBuffer();
+        const filename = 'jplace-map.png';
+        await sendDeferredWebhookResult(interaction, {
+          file: { name: filename, buffer, description: 'jplace 戦況マップ' },
+          components: buildMapComponents(filename, '最新タイルに更新しました'),
+        });
+      } catch (err) {
+        console.error('[map_refresh] 更新に失敗しました', {
+          message: err?.message || String(err),
+        });
+        await sendDeferredWebhookResult(
+          interaction,
+          errorV2(err?.message || 'マップの更新に失敗しました', true),
+          { ephemeral: true }
+        );
+      }
+    })();
+
+    if (ctx?.waitUntil) ctx.waitUntil(bgTask);
+
+    return new Response(
+      JSON.stringify({
+        type: RESPONSE_DEFERRED_UPDATE_MESSAGE,
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  if (customId === 'sector_select') {
+    const selected = interaction.data?.values?.[0] || null;
+    const bgTask = (async () => {
+      try {
+        console.log('[sector_select] 区画画像生成を開始します', { selected });
+        const buffer = await createSectorImageBuffer(selected);
+        const filename = selected ? `sector-${selected}.png` : 'sector-grid.png';
+        const caption = selected ? `区画 ${selected} の拡大マップ` : '区画一覧（A1〜C4）グリッド表示';
+        const components = [
+          containerComp({
+            accentColor: 0x10aea6,
+            components: [
+              textComp(`**jplace 区画マップ**\n${caption}`),
+              mediaGalleryComp(filename, caption),
+              sepComp(),
+              buildSectorSelectRow(selected),
+            ],
+          }),
+        ];
+        await sendDeferredWebhookResult(interaction, {
+          file: { name: filename, buffer, description: caption },
+          components,
+        });
+      } catch (err) {
+        console.error('[sector_select] 区画切替に失敗しました', {
+          message: err?.message || String(err),
+        });
+        await sendDeferredWebhookResult(
+          interaction,
+          errorV2(err?.message || '区画マップの切替に失敗しました', true),
+          { ephemeral: true }
+        );
+      }
+    })();
+
+    if (ctx?.waitUntil) ctx.waitUntil(bgTask);
+
+    return new Response(
+      JSON.stringify({
+        type: RESPONSE_DEFERRED_UPDATE_MESSAGE,
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  console.warn('[interaction] 未対応のコンポーネント操作', { customId });
+  const resObj = infoV2('操作を受付', `コンポーネント \`${customId}\` を処理しました。`, { ephemeral: true });
+  const payload = buildV2Payload(resObj, { ephemeral: true });
+  return new Response(payload.body, { status: 200, headers: payload.headers });
+}
+
+// ==========================================
+// Cloudflare Worker Entrypoint
+// ==========================================
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    console.log('[worker] リクエスト受信', {
+      method: request.method,
+      path: url.pathname,
+    });
+
+    if (ctx?.waitUntil) {
+      ctx.waitUntil(registerSlashCommandsIfNeeded(env));
+    } else {
+      await registerSlashCommandsIfNeeded(env);
+    }
+
+    if (request.method === 'GET') {
+      return new Response('jpace bot worker is running', {
+        status: 200,
+        headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+      });
+    }
+
+    if (request.method !== 'POST') {
+      return new Response('Method Not Allowed', { status: 405 });
+    }
+
+    const rawBody = await request.text();
+    const isValid = await verifyDiscordSignature(request, rawBody, env.DISCORD_PUBLIC_KEY);
+    if (!isValid) {
+      console.error('[worker] 署名検証に失敗したため 401 を返します');
+      return new Response('Invalid request signature', { status: 401 });
+    }
+
+    let interaction;
+    try {
+      interaction = JSON.parse(rawBody);
+    } catch (err) {
+      console.error('[worker] リクエストJSONのパースに失敗しました', {
+        message: err?.message || String(err),
+      });
+      return new Response('Invalid JSON', { status: 400 });
+    }
+
+    if (interaction.type === INTERACTION_PING) {
+      console.log('[worker] Discord PING を受信 -> PONG を返します');
+      return new Response(JSON.stringify({ type: RESPONSE_PONG }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    try {
+      if (interaction.type === INTERACTION_APPLICATION_COMMAND) {
+        return await handleApplicationCommand(interaction, env, ctx);
+      }
+      if (interaction.type === INTERACTION_MESSAGE_COMPONENT) {
+        return await handleMessageComponent(interaction, env, ctx);
+      }
+
+      console.warn('[worker] 未対応のインタラクション種別', { type: interaction.type });
+      const fallback = infoV2('未対応のインタラクション', `type: ${interaction.type}`, { ephemeral: true });
+      const payload = buildV2Payload(fallback, { ephemeral: true });
+      return new Response(payload.body, { status: 200, headers: payload.headers });
+    } catch (err) {
+      console.error('[worker] インタラクション処理中に例外が発生しました', {
+        message: err?.message || String(err),
+        stack: err?.stack || null,
+      });
+      const errObj = errorV2(err?.message || '予期しないエラーが発生しました', true);
+      const payload = buildV2Payload(errObj, { ephemeral: true });
+      return new Response(payload.body, { status: 200, headers: payload.headers });
+    }
+  },
+};
