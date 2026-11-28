@@ -65,11 +65,11 @@ const SLASH_COMMANDS = [
     options: [
       {
         name: 'scope',
-        description: '登録先（auto: 環境変数に従う / guild: 現在のサーバー / global: グローバル）',
+        description: '登録先（auto: 自動判定 / guild: 現在のサーバー / global: グローバル）',
         type: 3, // STRING
         required: false,
         choices: [
-          { name: 'auto（環境変数に従う）', value: 'auto' },
+          { name: 'auto（自動判定）', value: 'auto' },
           { name: 'guild（このサーバーのみ・即反映向き）', value: 'guild' },
           { name: 'global（全サーバー）', value: 'global' },
         ],
@@ -93,10 +93,10 @@ async function ensureWasmInit() {
 }
 
 // ==========================================
-// スラッシュコマンド登録（自動登録＋/register手動実行）
+// スラッシュコマンド自動登録（グローバル＋サーバー即反映）
 // ==========================================
-let commandsRegistered = false;
-let commandsRegisterPromise = null;
+const registeredScopes = new Set();
+const registeringPromises = new Map();
 
 function resolveCommandEndpoint(env, scopeMode = 'auto', guildIdOverride = null) {
   const appId = String(env?.DISCORD_APPLICATION_ID || '').trim();
@@ -185,9 +185,7 @@ async function registerSlashCommands(env, { source = 'auto', scopeMode = 'auto',
         // JSONパース失敗時は定義一覧を使う
       }
 
-      if (source === 'auto' && scopeMode === 'auto') {
-        commandsRegistered = true;
-      }
+      registeredScopes.add(target.scope);
 
       console.log('[cmd-reg] コマンド登録成功', {
         source,
@@ -243,20 +241,44 @@ async function registerSlashCommands(env, { source = 'auto', scopeMode = 'auto',
   }
 }
 
-async function registerSlashCommandsIfNeeded(env) {
-  if (commandsRegistered) {
-    return;
+async function registerSlashCommandsIfNeeded(env, guildId = null) {
+  const tasks = [];
+
+  // 1. グローバルまたは環境変数指定スコープの自動登録
+  const defaultTarget = resolveCommandEndpoint(env, 'auto', null);
+  if (!defaultTarget.error && !registeredScopes.has(defaultTarget.scope)) {
+    const key = defaultTarget.scope;
+    if (!registeringPromises.has(key)) {
+      const p = registerSlashCommands(env, { source: 'auto', scopeMode: 'auto' }).finally(() => {
+        registeringPromises.delete(key);
+      });
+      registeringPromises.set(key, p);
+    }
+    tasks.push(registeringPromises.get(key));
   }
-  if (!commandsRegisterPromise) {
-    commandsRegisterPromise = (async () => {
-      try {
-        await registerSlashCommands(env, { source: 'auto', scopeMode: 'auto' });
-      } finally {
-        commandsRegisterPromise = null;
+
+  // 2. インタラクション元のサーバー(guildId)が判明している場合、即反映用にサーバー登録も自動実行
+  if (guildId) {
+    const guildTarget = resolveCommandEndpoint(env, 'guild', guildId);
+    if (!guildTarget.error && !registeredScopes.has(guildTarget.scope)) {
+      const gKey = guildTarget.scope;
+      if (!registeringPromises.has(gKey)) {
+        const gp = registerSlashCommands(env, {
+          source: 'auto-guild',
+          scopeMode: 'guild',
+          guildIdOverride: guildId,
+        }).finally(() => {
+          registeringPromises.delete(gKey);
+        });
+        registeringPromises.set(gKey, gp);
       }
-    })();
+      tasks.push(registeringPromises.get(gKey));
+    }
   }
-  await commandsRegisterPromise;
+
+  if (tasks.length > 0) {
+    await Promise.allSettled(tasks);
+  }
 }
 
 // ==========================================
@@ -919,36 +941,59 @@ async function handleApplicationCommand(interaction, env, ctx) {
     const scopeOpt = interaction.data?.options?.find((o) => o.name === 'scope')?.value || 'auto';
     const guildIdOverride = scopeOpt === 'guild' ? interaction.guild_id || null : null;
 
-    const regResult = await registerSlashCommands(env, {
-      source: 'slash:/register',
-      scopeMode: scopeOpt,
-      guildIdOverride,
-    });
+    const bgTask = (async () => {
+      try {
+        const regResult = await registerSlashCommands(env, {
+          source: 'slash:/register',
+          scopeMode: scopeOpt,
+          guildIdOverride,
+        });
 
-    if (regResult.ok) {
-      const resObj = infoV2(
-        'スラッシュコマンド登録完了',
-        [
-          `スコープ: \`${regResult.scope}\` (HTTP ${regResult.status})`,
-          `登録コマンド: ${regResult.registered.map((n) => `\`/${n}\``).join(', ')}`,
-          'ログにも `[cmd-reg] コマンド登録成功` を記録しました。',
-        ],
-        { ephemeral: true, accentColor: 0x13e67b }
-      );
-      const payload = buildV2Payload(resObj, { ephemeral: true });
-      return new Response(payload.body, { status: 200, headers: payload.headers });
-    }
+        if (regResult.ok) {
+          const resObj = infoV2(
+            'スラッシュコマンド登録完了',
+            [
+              `スコープ: \`${regResult.scope}\` (HTTP ${regResult.status})`,
+              `登録コマンド: ${regResult.registered.map((n) => `\`/${n}\``).join(', ')}`,
+              'Discord を再読み込みするとコマンド一覧に反映されます。',
+            ],
+            { ephemeral: true, accentColor: 0x13e67b }
+          );
+          await sendDeferredWebhookResult(interaction, resObj, { ephemeral: true });
+          return;
+        }
 
-    const detailLines = [
-      `理由: ${regResult.reason}`,
-      `スコープ: \`${regResult.scope}\``,
-    ];
-    if (regResult.errorBody) {
-      detailLines.push(`詳細: \`${regResult.errorBody}\``);
-    }
-    const errObj = errorV2(detailLines.join('\n'), true);
-    const payload = buildV2Payload(errObj, { ephemeral: true });
-    return new Response(payload.body, { status: 200, headers: payload.headers });
+        const detailLines = [
+          `理由: ${regResult.reason}`,
+          `スコープ: \`${regResult.scope}\``,
+        ];
+        if (regResult.errorBody) {
+          detailLines.push(`詳細: \`${regResult.errorBody}\``);
+        }
+        await sendDeferredWebhookResult(interaction, errorV2(detailLines.join('\n'), true), {
+          ephemeral: true,
+        });
+      } catch (err) {
+        console.error('[cmd-reg] /register バックグラウンド処理エラー', {
+          message: err?.message || String(err),
+        });
+        await sendDeferredWebhookResult(
+          interaction,
+          errorV2(err?.message || 'コマンド登録中にエラーが発生しました', true),
+          { ephemeral: true }
+        );
+      }
+    })();
+
+    if (ctx?.waitUntil) ctx.waitUntil(bgTask);
+
+    return new Response(
+      JSON.stringify({
+        type: RESPONSE_DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+        data: { flags: FLAG_EPHEMERAL_V2 },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
   }
 
   if (cmdName === 'map') {
@@ -1138,13 +1183,12 @@ export default {
       path: url.pathname,
     });
 
-    if (ctx?.waitUntil) {
-      ctx.waitUntil(registerSlashCommandsIfNeeded(env));
-    } else {
-      await registerSlashCommandsIfNeeded(env);
-    }
-
     if (request.method === 'GET') {
+      if (ctx?.waitUntil) {
+        ctx.waitUntil(registerSlashCommandsIfNeeded(env, null));
+      } else {
+        await registerSlashCommandsIfNeeded(env, null);
+      }
       return new Response('jpace bot worker is running', {
         status: 200,
         headers: { 'Content-Type': 'text/plain; charset=utf-8' },
@@ -1170,6 +1214,10 @@ export default {
         message: err?.message || String(err),
       });
       return new Response('Invalid JSON', { status: 400 });
+    }
+
+    if (ctx?.waitUntil) {
+      ctx.waitUntil(registerSlashCommandsIfNeeded(env, interaction.guild_id || null));
     }
 
     if (interaction.type === INTERACTION_PING) {
