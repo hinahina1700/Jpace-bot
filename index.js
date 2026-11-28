@@ -13,6 +13,10 @@ const RESPONSE_DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE = 5;
 const RESPONSE_DEFERRED_UPDATE_MESSAGE = 6;
 const RESPONSE_AUTOCOMPLETE_RESULT = 8;
 
+// Application Command Types
+const CMD_TYPE_CHAT_INPUT = 1;
+const CMD_TYPE_MESSAGE = 3;
+
 // Components V2 Flags & Types
 const FLAG_IS_COMPONENTS_V2 = 32768;
 const FLAG_EPHEMERAL_V2 = 32768 | 64; // 32832
@@ -44,6 +48,9 @@ const CROP_WIDTH = 3866 - 922;  // 2944
 const CROP_HEIGHT = 3904 - 364; // 3540
 const SECTOR_COLS = ['A', 'B', 'C'];
 const SECTOR_ROWS = ['1', '2', '3', '4'];
+
+// Tile fetch timeout (ms)
+const TILE_FETCH_TIMEOUT_MS = 1200;
 
 // Discord Permission Bits
 const PERM_ADMINISTRATOR = 1n << 3n;
@@ -139,18 +146,21 @@ const ACTION_TYPES = [
 const ACTION_TYPE_MAP = new Map(ACTION_TYPES.map((t) => [t.value, t]));
 
 // ==========================================
-// スラッシュコマンド定義（COMMANDS_LIST / グローバル専用）
+// コマンド定義（COMMANDS_LIST / グローバル専用 + Message Context Menu）
 // ==========================================
 const COMMANDS_LIST = [
   {
+    type: CMD_TYPE_CHAT_INPUT,
     name: 'now',
     description: '現在のjplace戦況マップを表示します',
   },
   {
+    type: CMD_TYPE_CHAT_INPUT,
     name: 'post_now',
     description: '指定チャンネルへ現在のjplace戦況マップを送信します',
   },
   {
+    type: CMD_TYPE_CHAT_INPUT,
     name: 'highlight',
     description: '指定したwplaceカラーのみを強調し、他をグレースケール化したマップを表示します',
     options: [
@@ -164,6 +174,7 @@ const COMMANDS_LIST = [
     ],
   },
   {
+    type: CMD_TYPE_CHAT_INPUT,
     name: 'sector',
     description: 'jplace区画マップ（A1〜C4の12分割）を表示・拡大します',
     options: [
@@ -177,6 +188,7 @@ const COMMANDS_LIST = [
     ],
   },
   {
+    type: CMD_TYPE_CHAT_INPUT,
     name: 'rename_role',
     description: '自国のwplaceカラーロール名を変更します',
     options: [
@@ -195,10 +207,12 @@ const COMMANDS_LIST = [
     ],
   },
   {
+    type: CMD_TYPE_CHAT_INPUT,
     name: 'nations',
     description: 'サーバー内のjplace国家（wplaceカラーロール）一覧を表示します',
   },
   {
+    type: CMD_TYPE_CHAT_INPUT,
     name: 'action',
     description: '公式外交宣言・条約締結を行います',
     options: [
@@ -236,6 +250,7 @@ const COMMANDS_LIST = [
     ],
   },
   {
+    type: CMD_TYPE_CHAT_INPUT,
     name: 'setup_color_roles',
     description: '【管理者限定】wplaceカラーロールの初期セットアップを行います',
     default_member_permissions: '8',
@@ -249,14 +264,17 @@ const COMMANDS_LIST = [
     ],
   },
   {
+    type: CMD_TYPE_CHAT_INPUT,
     name: 'color_panel',
     description: 'wplaceカラーパレット一覧および作成済みカラーロール一覧を表示します',
   },
   {
+    type: CMD_TYPE_CHAT_INPUT,
     name: 'role_directory',
     description: 'サーバー内のwplaceカラーロール一覧を表示します',
   },
   {
+    type: CMD_TYPE_CHAT_INPUT,
     name: 'color_match',
     description: '指定した色またはロール色に最も近いwplaceカラーを検索します',
     options: [
@@ -275,6 +293,7 @@ const COMMANDS_LIST = [
     ],
   },
   {
+    type: CMD_TYPE_CHAT_INPUT,
     name: 'avatar',
     description: 'ユーザーのアバター画像を表示します',
     options: [
@@ -287,10 +306,12 @@ const COMMANDS_LIST = [
     ],
   },
   {
+    type: CMD_TYPE_CHAT_INPUT,
     name: 'server_info',
     description: 'サーバーの基本情報を表示します',
   },
   {
+    type: CMD_TYPE_CHAT_INPUT,
     name: 'user_info',
     description: 'ユーザーの基本情報とwplaceカラーロールを表示します',
     options: [
@@ -303,14 +324,17 @@ const COMMANDS_LIST = [
     ],
   },
   {
+    type: CMD_TYPE_CHAT_INPUT,
     name: 'ping',
     description: 'Botの応答状態を確認します',
   },
   {
+    type: CMD_TYPE_CHAT_INPUT,
     name: 'help',
     description: 'Jpace-bot v2 のコマンド一覧と使い方を表示します',
   },
   {
+    type: CMD_TYPE_CHAT_INPUT,
     name: 'register',
     description: 'グローバルコマンド一覧をDiscordに登録・再同期します',
     options: [
@@ -325,6 +349,10 @@ const COMMANDS_LIST = [
         ],
       },
     ],
+  },
+  {
+    type: CMD_TYPE_MESSAGE,
+    name: '自分のコマンド・発言を削除',
   },
 ];
 
@@ -661,6 +689,19 @@ function infoV2(title, lines, { ephemeral = false, accentColor = 0x4093e4, compo
   };
 }
 
+function progressLogV2(title, logLines, accentColor = 0xf6aa09) {
+  const body = logLines.map((line) => `• ${sanitizeDisplayText(line)}`).join('\n');
+  return {
+    ephemeral: false,
+    components: [
+      containerComp({
+        accentColor,
+        components: [textComp(`**${sanitizeDisplayText(title)}**\n${body}`)],
+      }),
+    ],
+  };
+}
+
 // ==========================================
 // グローバルコマンド登録（/register & 自動登録）
 // ==========================================
@@ -960,9 +1001,9 @@ function encodeRawRgbaToPng(rgbaBuf, width, height) {
 }
 
 // ==========================================
-// 画像生成・加工（タイムアウト保護 + メモリ安全管理）
+// 画像生成・加工（1200ms タイムアウト + 進捗コールバック + メモリ安全管理）
 // ==========================================
-async function fetchTileEntries(timeoutMs = 2200) {
+async function fetchTileEntries(timeoutMs = TILE_FETCH_TIMEOUT_MS) {
   const tasks = [];
   for (let y = 0; y < 4; y++) {
     for (let x = 0; x < 4; x++) {
@@ -991,7 +1032,7 @@ async function fetchTileEntries(timeoutMs = 2200) {
   return settled.filter(Boolean);
 }
 
-async function buildMergedRawRgba() {
+async function buildMergedRawRgba(onTilesFetched = null) {
   const baseBuf = new Uint8Array(CROP_WIDTH * CROP_HEIGHT * 4);
   for (let i = 0; i < baseBuf.length; i += 4) {
     baseBuf[i] = 138;
@@ -1000,7 +1041,11 @@ async function buildMergedRawRgba() {
     baseBuf[i + 3] = 255;
   }
 
-  const tiles = await fetchTileEntries(2200);
+  const tiles = await fetchTileEntries(TILE_FETCH_TIMEOUT_MS);
+  if (typeof onTilesFetched === 'function') {
+    await onTilesFetched(tiles.length, 16);
+  }
+
   const canUseWasm = await ensureWasmReady();
 
   if (canUseWasm && typeof PhotonImageCtor === 'function') {
@@ -1020,6 +1065,7 @@ async function buildMergedRawRgba() {
         width: canvas.get_width(),
         height: canvas.get_height(),
         rgba: new Uint8Array(canvas.get_raw_pixels()),
+        tileCount: tiles.length,
         wasmImage: canvas,
       };
     } catch (err) {
@@ -1034,17 +1080,18 @@ async function buildMergedRawRgba() {
     width: CROP_WIDTH,
     height: CROP_HEIGHT,
     rgba: baseBuf,
+    tileCount: tiles.length,
     wasmImage: null,
   };
 }
 
-async function createMergedImageBuffer() {
-  const merged = await buildMergedRawRgba();
+async function createMergedImageBuffer(onTilesFetched = null) {
+  const merged = await buildMergedRawRgba(onTilesFetched);
   try {
-    if (merged.wasmImage) {
-      return merged.wasmImage.get_bytes().buffer;
-    }
-    return encodeRawRgbaToPng(merged.rgba, merged.width, merged.height);
+    const buffer = merged.wasmImage
+      ? merged.wasmImage.get_bytes().buffer
+      : encodeRawRgbaToPng(merged.rgba, merged.width, merged.height);
+    return { buffer, tileCount: merged.tileCount };
   } finally {
     if (merged.wasmImage) {
       merged.wasmImage.free();
@@ -1150,8 +1197,8 @@ function computeSectorRect(totalWidth, totalHeight, areaCode) {
   };
 }
 
-async function createSectorImageBuffer(areaCode = null) {
-  const merged = await buildMergedRawRgba();
+async function createSectorImageBuffer(areaCode = null, onTilesFetched = null) {
+  const merged = await buildMergedRawRgba(onTilesFetched);
   try {
     const { width, height, rgba } = merged;
     const buf = new Uint8Array(rgba);
@@ -1174,12 +1221,12 @@ async function createSectorImageBuffer(areaCode = null) {
       if (merged.wasmImage && typeof PhotonImageCtor === 'function') {
         const gridImg = new PhotonImageCtor(buf, width, height);
         try {
-          return gridImg.get_bytes().buffer;
+          return { buffer: gridImg.get_bytes().buffer, tileCount: merged.tileCount };
         } finally {
           gridImg.free();
         }
       }
-      return encodeRawRgbaToPng(buf, width, height);
+      return { buffer: encodeRawRgbaToPng(buf, width, height), tileCount: merged.tileCount };
     }
 
     const subW = sector.width;
@@ -1201,12 +1248,12 @@ async function createSectorImageBuffer(areaCode = null) {
     if (merged.wasmImage && typeof PhotonImageCtor === 'function') {
       const croppedImg = new PhotonImageCtor(subBuf, subW, subH);
       try {
-        return croppedImg.get_bytes().buffer;
+        return { buffer: croppedImg.get_bytes().buffer, tileCount: merged.tileCount };
       } finally {
         croppedImg.free();
       }
     }
-    return encodeRawRgbaToPng(subBuf, subW, subH);
+    return { buffer: encodeRawRgbaToPng(subBuf, subW, subH), tileCount: merged.tileCount };
   } finally {
     if (merged.wasmImage) {
       merged.wasmImage.free();
@@ -1478,7 +1525,7 @@ function buildActionCard({
 }
 
 // ==========================================
-// Webhook / Channel Poster Helpers
+// Webhook / Followup / Channel Poster Helpers
 // ==========================================
 async function sendDeferredWebhookResult(interaction, result, { ephemeral = false } = {}) {
   const appId = interaction.application_id;
@@ -1503,8 +1550,34 @@ async function sendDeferredWebhookResult(interaction, result, { ephemeral = fals
   }
 }
 
+async function sendFollowupWebhookResult(interaction, result, { ephemeral = true } = {}) {
+  const appId = interaction.application_id;
+  const token = interaction.token;
+  if (!appId || !token) return;
+
+  const endpoint = `https://discord.com/api/v10/webhooks/${encodeURIComponent(appId)}/${encodeURIComponent(token)}`;
+  const payload = buildV2Payload(result, { ephemeral });
+
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: payload.headers,
+      body: payload.body,
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      console.error('[webhook] Followup POST 失敗:', {
+        status: res.status,
+        body: errText.slice(0, 300),
+      });
+    }
+  } catch (err) {
+    console.error('[webhook] Followup POST 通信エラー:', { message: err?.message || String(err) });
+  }
+}
+
 async function postMapToChannel(env, channelId, captionText = '定期戦況マップ') {
-  const buffer = await createMergedImageBuffer();
+  const { buffer } = await createMergedImageBuffer();
   const filename = 'jplace-map.png';
   const payload = buildV2Payload(
     {
@@ -1595,6 +1668,97 @@ function handleAutocomplete(interaction) {
 }
 
 // ==========================================
+// Message Context Menu Handler (type: 3)
+// ==========================================
+function resolveMessageOwnerId(msg) {
+  if (!msg) return null;
+  const cmdInitiatorId =
+    msg.interaction_metadata?.user?.id || msg.interaction?.user?.id || null;
+  if (cmdInitiatorId) return String(cmdInitiatorId);
+  if (msg.author?.id) return String(msg.author.id);
+  return null;
+}
+
+async function handleMessageContextCommand(interaction, env, ctx) {
+  const actorUser = interaction.member?.user || interaction.user || null;
+  const targetMessageId = interaction.data?.target_id || null;
+  const targetMessage =
+    (targetMessageId && interaction.data?.resolved?.messages?.[targetMessageId]) ||
+    interaction.message ||
+    null;
+  const channelId = targetMessage?.channel_id || interaction.channel_id || null;
+
+  const bgTask = (async () => {
+    try {
+      if (!actorUser?.id || !targetMessageId || !channelId || !targetMessage) {
+        await sendDeferredWebhookResult(
+          interaction,
+          errorV2('対象メッセージまたは実行ユーザーを特定できませんでした。', true),
+          { ephemeral: true }
+        );
+        return;
+      }
+
+      const ownerId = resolveMessageOwnerId(targetMessage);
+      if (!ownerId || ownerId !== String(actorUser.id)) {
+        await sendDeferredWebhookResult(
+          interaction,
+          errorV2(
+            '削除できるのは、あなたが実行したコマンド結果またはあなた自身の発言のみです。',
+            true
+          ),
+          { ephemeral: true }
+        );
+        return;
+      }
+
+      const delRes = await discordApi(
+        env,
+        `/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(targetMessageId)}`,
+        { method: 'DELETE' }
+      );
+
+      if (!delRes.ok) {
+        await sendDeferredWebhookResult(
+          interaction,
+          errorV2(
+            `メッセージの削除に失敗しました (HTTP ${delRes.status})。Botのメッセージ管理権限や対象メッセージの種別を確認してください。`,
+            true
+          ),
+          { ephemeral: true }
+        );
+        return;
+      }
+
+      await sendDeferredWebhookResult(
+        interaction,
+        infoV2('削除完了', ['対象メッセージを削除しました。'], {
+          ephemeral: true,
+          accentColor: 0x13e67b,
+        }),
+        { ephemeral: true }
+      );
+    } catch (err) {
+      await sendDeferredWebhookResult(
+        interaction,
+        errorV2(err?.message || 'メッセージ削除処理中にエラーが発生しました。', true),
+        { ephemeral: true }
+      );
+    }
+  })();
+
+  if (ctx?.waitUntil) ctx.waitUntil(bgTask);
+
+  return new Response(
+    JSON.stringify({
+      type: RESPONSE_DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+      data: { flags: FLAG_EPHEMERAL_V2 },
+    }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } }
+  );
+}
+
+// ==========================================
 // Application Command Handler (type: 2 / 全コマンド Deferred 統一)
 // ==========================================
 function getOptValue(interaction, name) {
@@ -1605,6 +1769,11 @@ function getOptValue(interaction, name) {
 const EPHEMERAL_COMMANDS = new Set(['register', 'help', 'color_match', 'setup_color_roles']);
 
 async function handleApplicationCommand(interaction, env, ctx) {
+  const cmdType = interaction.data?.type ?? CMD_TYPE_CHAT_INPUT;
+  if (cmdType === CMD_TYPE_MESSAGE) {
+    return handleMessageContextCommand(interaction, env, ctx);
+  }
+
   const cmdName = interaction.data?.name || '';
   const guildId = interaction.guild_id || null;
   const actorUser = interaction.member?.user || interaction.user || null;
@@ -1642,6 +1811,7 @@ async function handleApplicationCommand(interaction, env, ctx) {
           '**管理・ユーティリティ**',
           '- `/setup_color_roles`（管理者限定）: カラーロール一括作成',
           '- `/color_panel`, `/role_directory`, `/color_match`, `/avatar`, `/server_info`, `/user_info`, `/ping`, `/register`',
+          '- メッセージ右クリック「アプリ」→ **自分のコマンド・発言を削除**',
         ];
         await sendDeferredWebhookResult(
           interaction,
@@ -1692,13 +1862,33 @@ async function handleApplicationCommand(interaction, env, ctx) {
       }
 
       if (cmdName === 'now') {
-        const buffer = await createMergedImageBuffer();
+        const logLines = [
+          `タイル取得中（4x4 / 16タイル、制限 ${TILE_FETCH_TIMEOUT_MS}ms）...`,
+        ];
+        await sendDeferredWebhookResult(
+          interaction,
+          progressLogV2('jplace 戦況マップ 生成進捗', logLines),
+          { ephemeral: false }
+        );
+
+        const { buffer, tileCount } = await createMergedImageBuffer(async (fetchedCount, totalCount) => {
+          logLines.push(`タイル取得完了: ${fetchedCount}/${totalCount}枚 → 合成・PNG生成中...`);
+          await sendDeferredWebhookResult(
+            interaction,
+            progressLogV2('jplace 戦況マップ 生成進捗', logLines),
+            { ephemeral: false }
+          );
+        });
+
         const filename = 'jplace-map.png';
         await sendDeferredWebhookResult(
           interaction,
           {
             file: { name: filename, buffer, description: 'jplace 戦況マップ' },
-            components: buildMapComponents(filename, '最新のタイル合成マップを表示中'),
+            components: buildMapComponents(
+              filename,
+              `最新のタイル合成マップを表示中（取得タイル: ${tileCount}/16枚）`
+            ),
           },
           { ephemeral: false }
         );
@@ -1770,11 +1960,32 @@ async function handleApplicationCommand(interaction, env, ctx) {
           return;
         }
         const normArea = areaOpt ? String(areaOpt).toUpperCase() : null;
-        const buffer = await createSectorImageBuffer(normArea);
+        const targetLabel = normArea ? `区画 ${normArea}` : '全体 12区画グリッド';
+        const logLines = [
+          `タイル取得中（${targetLabel}、制限 ${TILE_FETCH_TIMEOUT_MS}ms）...`,
+        ];
+        await sendDeferredWebhookResult(
+          interaction,
+          progressLogV2('jplace 区画マップ 生成進捗', logLines),
+          { ephemeral: false }
+        );
+
+        const { buffer, tileCount } = await createSectorImageBuffer(
+          normArea,
+          async (fetchedCount, totalCount) => {
+            logLines.push(`タイル取得完了: ${fetchedCount}/${totalCount}枚 → 区画加工中...`);
+            await sendDeferredWebhookResult(
+              interaction,
+              progressLogV2('jplace 区画マップ 生成進捗', logLines),
+              { ephemeral: false }
+            );
+          }
+        );
+
         const filename = normArea ? `sector-${normArea}.png` : 'sector-grid.png';
         const caption = normArea
-          ? `区画 ${normArea} の拡大マップ（全体 3x4 分割のうち ${normArea}）`
-          : '全体マップ（横3列 A〜C × 縦4行 1〜4 の12区画グリッド）';
+          ? `区画 ${normArea} の拡大マップ（全体 3x4 分割のうち ${normArea}・取得 ${tileCount}/16枚）`
+          : `全体マップ（横3列 A〜C × 縦4行 1〜4 の12区画グリッド・取得 ${tileCount}/16枚）`;
         await sendDeferredWebhookResult(
           interaction,
           {
@@ -2290,7 +2501,7 @@ async function handleMessageComponent(interaction, env, ctx) {
   const bgUpdateTask = (async () => {
     try {
       if (customId === 'map_refresh') {
-        const buffer = await createMergedImageBuffer();
+        const { buffer } = await createMergedImageBuffer();
         const filename = 'jplace-map.png';
         await sendDeferredWebhookResult(interaction, {
           file: { name: filename, buffer, description: 'jplace 戦況マップ' },
@@ -2302,7 +2513,7 @@ async function handleMessageComponent(interaction, env, ctx) {
       if (customId === 'sector_select') {
         const selected = interaction.data?.values?.[0] || null;
         const normArea = selected && /^[ABC][1234]$/.test(selected) ? selected : null;
-        const buffer = await createSectorImageBuffer(normArea);
+        const { buffer } = await createSectorImageBuffer(normArea);
         const filename = normArea ? `sector-${normArea}.png` : 'sector-grid.png';
         const caption = normArea
           ? `区画 ${normArea} の拡大マップ（全体 3x4 分割のうち ${normArea}）`
@@ -2344,7 +2555,8 @@ async function handleMessageComponent(interaction, env, ctx) {
 
         if (op === 'act_accept' || op === 'act_reject') {
           if (!memberRoleSet.has(toRoleId)) {
-            await sendDeferredWebhookResult(
+            // 元の外交メッセージは上書きせず、フォローアップ（ephemeral）で通知
+            await sendFollowupWebhookResult(
               interaction,
               errorV2('この操作は相手国ロールを所持しているメンバーのみ実行できます。', true),
               { ephemeral: true }
@@ -2353,7 +2565,7 @@ async function handleMessageComponent(interaction, env, ctx) {
           }
         } else if (op === 'act_cancel') {
           if (!memberRoleSet.has(fromRoleId)) {
-            await sendDeferredWebhookResult(
+            await sendFollowupWebhookResult(
               interaction,
               errorV2('この操作は提案国ロールを所持しているメンバーのみ実行できます。', true),
               { ephemeral: true }
@@ -2394,7 +2606,7 @@ async function handleMessageComponent(interaction, env, ctx) {
         if (actorWplaceRoles.length > 0) {
           const r = actorWplaceRoles[0];
           if (r.id === fromRoleId) {
-            await sendDeferredWebhookResult(
+            await sendFollowupWebhookResult(
               interaction,
               errorV2('宣言国自身による自己公認・自己取消はできません。', true),
               { ephemeral: true }
@@ -2405,7 +2617,7 @@ async function handleMessageComponent(interaction, env, ctx) {
         } else if (isAdmin) {
           approverLabel = `- **運営（管理者）**`;
         } else {
-          await sendDeferredWebhookResult(
+          await sendFollowupWebhookResult(
             interaction,
             errorV2('公認または取消を行うにはwplaceカラーロール（または管理者権限）が必要です。', true),
             { ephemeral: true }
