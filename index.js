@@ -9,6 +9,8 @@ const INTERACTION_MESSAGE_COMPONENT = 3;
 
 const RESPONSE_PONG = 1;
 const RESPONSE_CHANNEL_MESSAGE_WITH_SOURCE = 4;
+const RESPONSE_DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE = 5;
+const RESPONSE_DEFERRED_UPDATE_MESSAGE = 6;
 const RESPONSE_UPDATE_MESSAGE = 7;
 
 // Components V2 Flags & Types
@@ -521,17 +523,20 @@ async function createMergedPhotonImage() {
     }
 
     const results = await Promise.all(fetchPromises);
+    let loadedCount = 0;
     for (const item of results) {
       if (item && item.tileImg) {
         try {
           const posX = item.x * 1000 - CROP_X;
           const posY = item.y * 1000 - CROP_Y;
           canvas.blend(item.tileImg, posX, posY, 'over');
+          loadedCount++;
         } finally {
           item.tileImg.free();
         }
       }
     }
+    console.log('[map] タイル合成完了', { loadedCount, total: fetchPromises.length });
 
     return canvas;
   } catch (err) {
@@ -544,39 +549,6 @@ async function createMergedImageBuffer() {
   const canvas = await createMergedPhotonImage();
   try {
     return canvas.get_bytes().buffer;
-  } finally {
-    canvas.free();
-  }
-}
-
-async function createHighlightImageBuffer(targetHex) {
-  const [tr, tg, tb] = hexToRgb(targetHex);
-  const canvas = await createMergedPhotonImage();
-  try {
-    const width = canvas.get_width();
-    const height = canvas.get_height();
-    const raw = canvas.get_raw_pixels();
-    const buf = new Uint8Array(raw);
-
-    for (let i = 0; i < buf.length; i += 4) {
-      const r = buf[i];
-      const g = buf[i + 1];
-      const b = buf[i + 2];
-      if (r === tr && g === tg && b === tb) {
-        continue;
-      }
-      const lum = Math.round(0.299 * r + 0.587 * g + 0.114 * b);
-      buf[i] = lum;
-      buf[i + 1] = lum;
-      buf[i + 2] = lum;
-    }
-
-    const outImg = new PhotonImage(buf, width, height);
-    try {
-      return outImg.get_bytes().buffer;
-    } finally {
-      outImg.free();
-    }
   } finally {
     canvas.free();
   }
@@ -734,6 +706,42 @@ function buildSectorSelectRow(selectedArea = null) {
 }
 
 // ==========================================
+// Webhook Followup Sender (タイムアウト回避用)
+// ==========================================
+async function sendDeferredWebhookResult(interaction, result, { ephemeral = false } = {}) {
+  const appId = interaction.application_id;
+  const token = interaction.token;
+  if (!appId || !token) {
+    console.error('[webhook] application_id または token がありません');
+    return;
+  }
+
+  const endpoint = `https://discord.com/api/v10/webhooks/${encodeURIComponent(appId)}/${encodeURIComponent(token)}/messages/@original`;
+  const payload = buildV2Payload(result, { ephemeral });
+
+  try {
+    const res = await fetch(endpoint, {
+      method: 'PATCH',
+      headers: payload.headers,
+      body: payload.body,
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      console.error('[webhook] 元の応答の更新に失敗しました', {
+        status: res.status,
+        body: text.slice(0, 500),
+      });
+    } else {
+      console.log('[webhook] 元の応答を更新しました', { status: res.status });
+    }
+  } catch (err) {
+    console.error('[webhook] Webhook送信中に通信エラーが発生しました', {
+      message: err?.message || String(err),
+    });
+  }
+}
+
+// ==========================================
 // Discord Ed25519 Signature Verification
 // ==========================================
 function hexToUint8Array(hex) {
@@ -785,7 +793,7 @@ async function verifyDiscordSignature(request, rawBodyText, publicKeyHex) {
 // ==========================================
 // Interaction Handlers
 // ==========================================
-async function handleApplicationCommand(interaction, env) {
+async function handleApplicationCommand(interaction, env, ctx) {
   const cmdName = interaction.data?.name || '';
   console.log('[interaction] スラッシュコマンドを受信', {
     cmdName,
@@ -794,41 +802,82 @@ async function handleApplicationCommand(interaction, env) {
   });
 
   if (cmdName === 'map') {
-    const buffer = await createMergedImageBuffer();
-    const filename = 'jplace-map.png';
-    const payload = buildV2Payload({
-      file: { name: filename, buffer, description: 'jplace 戦況マップ' },
-      components: buildMapComponents(filename, '最新タイル合成マップを表示中'),
-    });
-    return new Response(payload.body, {
-      status: 200,
-      headers: {
-        ...payload.headers,
-      },
-    });
+    const bgTask = (async () => {
+      try {
+        console.log('[map] 画像生成を開始します');
+        const buffer = await createMergedImageBuffer();
+        const filename = 'jplace-map.png';
+        await sendDeferredWebhookResult(interaction, {
+          file: { name: filename, buffer, description: 'jplace 戦況マップ' },
+          components: buildMapComponents(filename, '最新タイル合成マップを表示中'),
+        });
+      } catch (err) {
+        console.error('[map] 画像生成または送信に失敗しました', {
+          message: err?.message || String(err),
+        });
+        await sendDeferredWebhookResult(
+          interaction,
+          errorV2(err?.message || 'マップ画像の生成に失敗しました', true),
+          { ephemeral: true }
+        );
+      }
+    })();
+
+    if (ctx?.waitUntil) ctx.waitUntil(bgTask);
+
+    return new Response(
+      JSON.stringify({
+        type: RESPONSE_DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+        data: { flags: FLAG_IS_COMPONENTS_V2 },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
   }
 
   if (cmdName === 'sector') {
     const areaOpt = interaction.data?.options?.find((o) => o.name === 'area')?.value || null;
-    const buffer = await createSectorImageBuffer(areaOpt);
-    const filename = areaOpt ? `sector-${areaOpt.toUpperCase()}.png` : 'sector-grid.png';
-    const caption = areaOpt ? `区画 ${areaOpt.toUpperCase()} の拡大マップ` : '区画一覧（A1〜C4）グリッド表示';
-    const components = [
-      containerComp({
-        accentColor: 0x10aea6,
-        components: [
-          textComp(`**jplace 区画マップ**\n${caption}`),
-          mediaGalleryComp(filename, caption),
-          sepComp(),
-          buildSectorSelectRow(areaOpt),
-        ],
+    const bgTask = (async () => {
+      try {
+        console.log('[sector] 区画画像生成を開始します', { areaOpt });
+        const buffer = await createSectorImageBuffer(areaOpt);
+        const filename = areaOpt ? `sector-${areaOpt.toUpperCase()}.png` : 'sector-grid.png';
+        const caption = areaOpt ? `区画 ${areaOpt.toUpperCase()} の拡大マップ` : '区画一覧（A1〜C4）グリッド表示';
+        const components = [
+          containerComp({
+            accentColor: 0x10aea6,
+            components: [
+              textComp(`**jplace 区画マップ**\n${caption}`),
+              mediaGalleryComp(filename, caption),
+              sepComp(),
+              buildSectorSelectRow(areaOpt),
+            ],
+          }),
+        ];
+        await sendDeferredWebhookResult(interaction, {
+          file: { name: filename, buffer, description: caption },
+          components,
+        });
+      } catch (err) {
+        console.error('[sector] 区画画像生成または送信に失敗しました', {
+          message: err?.message || String(err),
+        });
+        await sendDeferredWebhookResult(
+          interaction,
+          errorV2(err?.message || '区画マップの生成に失敗しました', true),
+          { ephemeral: true }
+        );
+      }
+    })();
+
+    if (ctx?.waitUntil) ctx.waitUntil(bgTask);
+
+    return new Response(
+      JSON.stringify({
+        type: RESPONSE_DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE,
+        data: { flags: FLAG_IS_COMPONENTS_V2 },
       }),
-    ];
-    const payload = buildV2Payload({
-      file: { name: filename, buffer, description: caption },
-      components,
-    });
-    return new Response(payload.body, { status: 200, headers: payload.headers });
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
   }
 
   console.warn('[interaction] 未対応のスラッシュコマンド', { cmdName });
@@ -837,7 +886,7 @@ async function handleApplicationCommand(interaction, env) {
   return new Response(payload.body, { status: 200, headers: payload.headers });
 }
 
-async function handleMessageComponent(interaction, env) {
+async function handleMessageComponent(interaction, env, ctx) {
   const customId = interaction.data?.custom_id || '';
   console.log('[interaction] コンポーネント操作を受信', {
     customId,
@@ -846,15 +895,32 @@ async function handleMessageComponent(interaction, env) {
   });
 
   if (customId === 'map_refresh') {
-    const buffer = await createMergedImageBuffer();
-    const filename = 'jplace-map.png';
+    const bgTask = (async () => {
+      try {
+        console.log('[map_refresh] 画像再生成を開始します');
+        const buffer = await createMergedImageBuffer();
+        const filename = 'jplace-map.png';
+        await sendDeferredWebhookResult(interaction, {
+          file: { name: filename, buffer, description: 'jplace 戦況マップ' },
+          components: buildMapComponents(filename, '最新タイルに更新しました'),
+        });
+      } catch (err) {
+        console.error('[map_refresh] 更新に失敗しました', {
+          message: err?.message || String(err),
+        });
+        await sendDeferredWebhookResult(
+          interaction,
+          errorV2(err?.message || 'マップの更新に失敗しました', true),
+          { ephemeral: true }
+        );
+      }
+    })();
+
+    if (ctx?.waitUntil) ctx.waitUntil(bgTask);
+
     return new Response(
       JSON.stringify({
-        type: RESPONSE_UPDATE_MESSAGE,
-        data: {
-          flags: FLAG_IS_COMPONENTS_V2,
-          components: buildMapComponents(filename, '最新タイルに更新しました'),
-        },
+        type: RESPONSE_DEFERRED_UPDATE_MESSAGE,
       }),
       { status: 200, headers: { 'Content-Type': 'application/json' } }
     );
@@ -862,25 +928,47 @@ async function handleMessageComponent(interaction, env) {
 
   if (customId === 'sector_select') {
     const selected = interaction.data?.values?.[0] || null;
-    const buffer = await createSectorImageBuffer(selected);
-    const filename = selected ? `sector-${selected}.png` : 'sector-grid.png';
-    const caption = selected ? `区画 ${selected} の拡大マップ` : '区画一覧（A1〜C4）グリッド表示';
-    const components = [
-      containerComp({
-        accentColor: 0x10aea6,
-        components: [
-          textComp(`**jplace 区画マップ**\n${caption}`),
-          mediaGalleryComp(filename, caption),
-          sepComp(),
-          buildSectorSelectRow(selected),
-        ],
+    const bgTask = (async () => {
+      try {
+        console.log('[sector_select] 区画画像生成を開始します', { selected });
+        const buffer = await createSectorImageBuffer(selected);
+        const filename = selected ? `sector-${selected}.png` : 'sector-grid.png';
+        const caption = selected ? `区画 ${selected} の拡大マップ` : '区画一覧（A1〜C4）グリッド表示';
+        const components = [
+          containerComp({
+            accentColor: 0x10aea6,
+            components: [
+              textComp(`**jplace 区画マップ**\n${caption}`),
+              mediaGalleryComp(filename, caption),
+              sepComp(),
+              buildSectorSelectRow(selected),
+            ],
+          }),
+        ];
+        await sendDeferredWebhookResult(interaction, {
+          file: { name: filename, buffer, description: caption },
+          components,
+        });
+      } catch (err) {
+        console.error('[sector_select] 区画切替に失敗しました', {
+          message: err?.message || String(err),
+        });
+        await sendDeferredWebhookResult(
+          interaction,
+          errorV2(err?.message || '区画マップの切替に失敗しました', true),
+          { ephemeral: true }
+        );
+      }
+    })();
+
+    if (ctx?.waitUntil) ctx.waitUntil(bgTask);
+
+    return new Response(
+      JSON.stringify({
+        type: RESPONSE_DEFERRED_UPDATE_MESSAGE,
       }),
-    ];
-    const payload = buildV2Payload({
-      file: { name: filename, buffer, description: caption },
-      components,
-    });
-    return new Response(payload.body, { status: 200, headers: payload.headers });
+      { status: 200, headers: { 'Content-Type': 'application/json' } }
+    );
   }
 
   console.warn('[interaction] 未対応のコンポーネント操作', { customId });
@@ -944,10 +1032,10 @@ export default {
 
     try {
       if (interaction.type === INTERACTION_APPLICATION_COMMAND) {
-        return await handleApplicationCommand(interaction, env);
+        return await handleApplicationCommand(interaction, env, ctx);
       }
       if (interaction.type === INTERACTION_MESSAGE_COMPONENT) {
-        return await handleMessageComponent(interaction, env);
+        return await handleMessageComponent(interaction, env, ctx);
       }
 
       console.warn('[worker] 未対応のインタラクション種別', { type: interaction.type });
