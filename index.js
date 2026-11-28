@@ -1,5 +1,4 @@
-import initPhotonWasm, { PhotonImage } from 'photon-wasm';
-import photonWasmModule from 'photon-wasm/photon_wasm_bg.wasm';
+import photonPkg, { PhotonImage } from 'photon-wasm';
 
 const CHANNEL_ID = '1507371465744580739';
 
@@ -90,19 +89,24 @@ async function ensureWasmInit() {
   if (!wasmInitPromise) {
     wasmInitPromise = (async () => {
       try {
-        console.log('[wasm] photon-wasm 初期化を開始します', {
-          hasInitFn: typeof initPhotonWasm === 'function',
-          wasmModuleType: typeof photonWasmModule,
+        const exportsKeys = photonPkg && typeof photonPkg === 'object' ? Object.keys(photonPkg) : [];
+        console.log('[wasm] photon-wasm 初期化チェック開始', {
+          pkgType: typeof photonPkg,
+          hasDefaultFn: typeof photonPkg === 'function',
+          hasInitFn: typeof photonPkg?.default === 'function' || typeof photonPkg?.init === 'function',
+          exportsKeys,
         });
 
-        if (typeof initPhotonWasm === 'function') {
-          await initPhotonWasm(photonWasmModule);
-        } else if (photonWasmModule instanceof WebAssembly.Module) {
-          await WebAssembly.instantiate(photonWasmModule);
+        if (typeof photonPkg === 'function') {
+          await photonPkg();
+        } else if (typeof photonPkg?.default === 'function') {
+          await photonPkg.default();
+        } else if (typeof photonPkg?.init === 'function') {
+          await photonPkg.init();
         }
 
         wasmInitialized = true;
-        console.log('[wasm] photon-wasm 初期化が完了しました');
+        console.log('[wasm] photon-wasm 初期化チェック完了');
       } catch (err) {
         console.error('[wasm] photon-wasm 初期化に失敗しました', {
           message: err?.message || String(err),
@@ -146,7 +150,6 @@ function resolveCommandEndpoint(env, scopeMode = 'auto', guildIdOverride = null)
   } else if (scopeMode === 'global') {
     useGuild = false;
   } else {
-    // auto
     useGuild = Boolean(targetGuildId);
   }
 
