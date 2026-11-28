@@ -1,4 +1,4 @@
-import * as photonNs, { PhotonImage } from 'photon-wasm';
+import { PhotonImage } from 'photon-wasm';
 
 const CHANNEL_ID = '1507371465744580739';
 
@@ -79,42 +79,17 @@ const SLASH_COMMANDS = [
 ];
 
 // ==========================================
-// Wasm 初期化管理（__wbindgen_malloc 未定義対策）
+// Wasm 初期化管理
 // ==========================================
 let wasmInitialized = false;
-let wasmInitPromise = null;
 
 async function ensureWasmInit() {
-  if (wasmInitialized) return;
-  if (!wasmInitPromise) {
-    wasmInitPromise = (async () => {
-      try {
-        const keys = photonNs && typeof photonNs === 'object' ? Object.keys(photonNs) : [];
-        const initFn = photonNs?.init || photonNs?.default || null;
-        console.log('[wasm] photon-wasm 初期化チェック開始', {
-          hasInitFn: typeof initFn === 'function',
-          hasPhotonImage: typeof PhotonImage === 'function',
-          exportsKeys: keys,
-        });
-
-        if (typeof initFn === 'function') {
-          await initFn();
-        }
-
-        wasmInitialized = true;
-        console.log('[wasm] photon-wasm 初期化チェック完了');
-      } catch (err) {
-        console.error('[wasm] photon-wasm 初期化に失敗しました', {
-          message: err?.message || String(err),
-          stack: err?.stack || null,
-        });
-        throw err;
-      } finally {
-        wasmInitPromise = null;
-      }
-    })();
+  if (!wasmInitialized) {
+    wasmInitialized = true;
+    console.log('[wasm] photon-wasm 初期化フラグを確認しました', {
+      hasPhotonImage: typeof PhotonImage === 'function',
+    });
   }
-  await wasmInitPromise;
 }
 
 // ==========================================
